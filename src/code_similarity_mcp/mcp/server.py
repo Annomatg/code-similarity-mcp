@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp import types
+from mcp.server.fastmcp import FastMCP
 
 from code_similarity_mcp.embeddings.generator import EmbeddingGenerator
 from code_similarity_mcp.index.registry import MethodRegistry
@@ -16,7 +13,7 @@ from code_similarity_mcp.normalizer import normalize_code
 from code_similarity_mcp.parser.registry import SUPPORTED_EXTENSIONS, get_parser
 from code_similarity_mcp.similarity.scorer import SimilarityScorer
 
-app = Server("code-similarity-mcp")
+app = FastMCP("code-similarity-mcp")
 _generator = EmbeddingGenerator()
 _scorer = SimilarityScorer()
 
@@ -34,7 +31,7 @@ def _get_registry(index_dir: str | None = None) -> MethodRegistry:
 # ---------------------------------------------------------------------------
 
 @app.tool()
-async def index_repository(
+def index_repository(
     repository_root: str,
     index_dir: str | None = None,
     force_reindex: bool = False,
@@ -67,7 +64,7 @@ async def index_repository(
             try:
                 parser = get_parser(lang)
                 methods = parser.parse_file(str_path)
-            except Exception as exc:
+            except Exception:
                 continue  # skip unparseable files silently
 
             for method in methods:
@@ -91,9 +88,9 @@ async def index_repository(
 # ---------------------------------------------------------------------------
 
 @app.tool()
-async def analyze_new_code(
+def analyze_new_code(
     code_snippet: str,
-    language: str = "gdscript",
+    language: str = "python",
     top_k: int = 3,
     index_dir: str | None = None,
 ) -> str:
@@ -102,7 +99,7 @@ async def analyze_new_code(
 
     Args:
         code_snippet: Source code to analyze.
-        language: Language of the snippet (default: gdscript).
+        language: Language of the snippet (default: python).
         top_k: Number of candidates to return per method (default: 3).
         index_dir: Index directory to query.
 
@@ -126,7 +123,6 @@ async def analyze_new_code(
         method.normalized_code = normalize_code(method.body_code, language)
         embedding = _generator.encode_one(method.normalized_code)
 
-        # Build query dict compatible with scorer
         query = {
             "id": -1,
             "file_path": "<snippet>",
@@ -172,8 +168,5 @@ async def analyze_new_code(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    async def _run():
-        async with stdio_server() as (read_stream, write_stream):
-            await app.run(read_stream, write_stream, app.create_initialization_options())
-
-    asyncio.run(_run())
+    import asyncio
+    asyncio.run(app.run_stdio_async())
