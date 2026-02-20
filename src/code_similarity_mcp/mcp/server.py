@@ -39,6 +39,13 @@ _scorer = SimilarityScorer()
 
 _DEFAULT_INDEX_DIR = Path.home() / ".code-similarity-mcp" / "index"
 
+_EXCLUDED_DIRS = {
+    ".venv", "venv", ".env",
+    "__pycache__", ".git", ".svn",
+    "node_modules", "site-packages",
+    "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
+}
+
 log.info("Server module loaded. Default index dir: %s", _DEFAULT_INDEX_DIR)
 
 
@@ -82,8 +89,11 @@ def index_repository(
     methods_indexed = 0
 
     for ext, lang in SUPPORTED_EXTENSIONS.items():
-        found = list(root.rglob(f"*{ext}"))
-        log.debug("Found %d %s files", len(found), lang)
+        found = [
+            p for p in root.rglob(f"*{ext}")
+            if not any(part in _EXCLUDED_DIRS for part in p.parts)
+        ]
+        log.debug("Found %d %s files (after exclusions)", len(found), lang)
         for file_path in found:
             str_path = str(file_path)
             if not force_reindex and registry.get_by_file(str_path):
