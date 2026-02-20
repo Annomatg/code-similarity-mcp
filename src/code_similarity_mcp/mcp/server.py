@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import traceback
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -13,16 +15,36 @@ from code_similarity_mcp.normalizer import normalize_code
 from code_similarity_mcp.parser.registry import SUPPORTED_EXTENSIONS, get_parser
 from code_similarity_mcp.similarity.scorer import SimilarityScorer
 
+# ---------------------------------------------------------------------------
+# Logging — file only (stdout would corrupt the stdio MCP transport)
+# ---------------------------------------------------------------------------
+
+_LOG_DIR = Path.home() / ".code-similarity-mcp"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    handlers=[logging.FileHandler(_LOG_DIR / "server.log", encoding="utf-8")],
+)
+log = logging.getLogger("code-similarity-mcp")
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
+
 app = FastMCP("code-similarity-mcp")
 _generator = EmbeddingGenerator()
 _scorer = SimilarityScorer()
 
-# Default index location (can be overridden per call)
 _DEFAULT_INDEX_DIR = Path.home() / ".code-similarity-mcp" / "index"
+
+log.info("Server module loaded. Default index dir: %s", _DEFAULT_INDEX_DIR)
 
 
 def _get_registry(index_dir: str | None = None) -> MethodRegistry:
     path = Path(index_dir) if index_dir else _DEFAULT_INDEX_DIR
+    log.debug("Opening registry at %s", path)
     return MethodRegistry(path)
 
 
@@ -47,8 +69,12 @@ def index_repository(
     Returns:
         JSON summary with files processed and methods indexed.
     """
+    log.info("index_repository called: root=%s index_dir=%s force=%s",
+             repository_root, index_dir, force_reindex)
+
     root = Path(repository_root)
     if not root.is_dir():
+        log.error("Not a directory: %s", repository_root)
         return json.dumps({"error": f"Not a directory: {repository_root}"})
 
     registry = _get_registry(index_dir)
@@ -56,17 +82,22 @@ def index_repository(
     methods_indexed = 0
 
     for ext, lang in SUPPORTED_EXTENSIONS.items():
-        for file_path in root.rglob(f"*{ext}"):
+        found = list(root.rglob(f"*{ext}"))
+        log.debug("Found %d %s files", len(found), lang)
+        for file_path in found:
             str_path = str(file_path)
             if not force_reindex and registry.get_by_file(str_path):
+                log.debug("Skipping already-indexed file: %s", str_path)
                 continue
             registry.delete_by_file(str_path)
             try:
                 parser = get_parser(lang)
                 methods = parser.parse_file(str_path)
             except Exception:
-                continue  # skip unparseable files silently
+                log.warning("Failed to parse %s:\n%s", str_path, traceback.format_exc())
+                continue
 
+            log.debug("  %s: %d methods", file_path.name, len(methods))
             for method in methods:
                 method.normalized_code = normalize_code(method.body_code, lang)
                 embedding = _generator.encode_one(method.normalized_code)
@@ -76,11 +107,13 @@ def index_repository(
             files_processed += 1
 
     registry.close()
-    return json.dumps({
+    result = {
         "files_processed": files_processed,
         "methods_indexed": methods_indexed,
         "index_dir": str(_DEFAULT_INDEX_DIR if not index_dir else index_dir),
-    })
+    }
+    log.info("index_repository done: %s", result)
+    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------
@@ -106,14 +139,19 @@ def analyze_new_code(
     Returns:
         JSON with new_methods list, each containing candidates with scores and hints.
     """
+    log.info("analyze_new_code called: language=%s top_k=%d snippet_len=%d",
+             language, top_k, len(code_snippet))
+
     registry = _get_registry(index_dir)
 
     try:
         parser = get_parser(language)
     except ValueError as e:
+        log.error("Unsupported language: %s", language)
         return json.dumps({"error": str(e)})
 
     methods = parser.parse_snippet(code_snippet, language)
+    log.debug("Parsed %d methods from snippet", len(methods))
     if not methods:
         return json.dumps({"new_methods": [], "note": "No methods found in snippet"})
 
@@ -139,6 +177,7 @@ def analyze_new_code(
 
         raw_candidates = registry.search(embedding, top_k=top_k * 3)
         scored = _scorer.score_candidates(query, raw_candidates)[:top_k]
+        log.debug("Method '%s': %d raw candidates, %d scored", method.name, len(raw_candidates), len(scored))
 
         output["new_methods"].append({
             "name": method.name,
@@ -160,6 +199,7 @@ def analyze_new_code(
         })
 
     registry.close()
+    log.info("analyze_new_code done: %d methods analyzed", len(output["new_methods"]))
     return json.dumps(output, indent=2)
 
 
@@ -169,4 +209,5 @@ def analyze_new_code(
 
 def main() -> None:
     import asyncio
+    log.info("Starting MCP server (stdio)")
     asyncio.run(app.run_stdio_async())
