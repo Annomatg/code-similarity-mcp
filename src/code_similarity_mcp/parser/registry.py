@@ -5,7 +5,7 @@ from __future__ import annotations
 from .base import BaseParser
 
 SUPPORTED_EXTENSIONS: dict[str, str] = {
-    ".gd": "gdscript",
+    ".py": "python",
 }
 
 _parsers: dict[str, BaseParser] = {}
@@ -19,7 +19,7 @@ def get_parser(language: str) -> BaseParser:
 
 
 def _create_parser(language: str) -> BaseParser:
-    if language == "gdscript":
-        from .gdscript import GDScriptParser
-        return GDScriptParser()
+    if language == "python":
+        from .python import PythonParser
+        return PythonParser()
     raise ValueError(f"Unsupported language: {language!r}")
