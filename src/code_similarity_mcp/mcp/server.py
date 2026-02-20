@@ -219,5 +219,10 @@ def analyze_new_code(
 
 def main() -> None:
     import asyncio
-    log.info("Starting MCP server (stdio)")
+    # Pre-load the embedding model in the main thread before the async loop
+    # starts. SentenceTransformer hangs when first loaded inside a thread
+    # executor on Windows (PyTorch DLL / multiprocessing init issue).
+    log.info("Pre-loading embedding model...")
+    _ = _generator.model
+    log.info("Model loaded. Starting MCP server (stdio)")
     asyncio.run(app.run_stdio_async())
