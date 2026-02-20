@@ -37,8 +37,8 @@ def test_similar_code_has_high_cosine_similarity(generator):
     """Normalized code from equivalent functions should embed very closely."""
     from code_similarity_mcp.normalizer import normalize_code
 
-    code_a = normalize_code("func calc(a, b):\n    return a + b")
-    code_b = normalize_code("func compute(x, y):\n    return x + y")
+    code_a = normalize_code("def calc(a, b):\n    return a + b")
+    code_b = normalize_code("def compute(x, y):\n    return x + y")
     # After normalization both become identical -> cosine ~1.0
     emb_a = generator.encode_one(code_a)
     emb_b = generator.encode_one(code_b)

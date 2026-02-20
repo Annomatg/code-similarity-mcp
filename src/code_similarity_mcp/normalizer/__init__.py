@@ -1,5 +1,12 @@
 """Code normalization to remove superficial variation."""
 
-from .normalizer import normalize_code
+from .base import BaseNormalizer
+from .registry import get_normalizer
 
-__all__ = ["normalize_code"]
+
+def normalize_code(code: str, language: str = "python") -> str:
+    """Normalize code for the given language."""
+    return get_normalizer(language).normalize(code)
+
+
+__all__ = ["BaseNormalizer", "get_normalizer", "normalize_code"]
