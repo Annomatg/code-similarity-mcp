@@ -1,0 +1,49 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# Distribution / packaging
+*.whl
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code session data
+.claude/
+
+# Project-specific: local index data
+*.faiss
+*.db
+id_map.json
+~/.code-similarity-mcp/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Hugging Face model cache (don't commit downloaded models)
+.cache/
