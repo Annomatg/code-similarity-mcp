@@ -110,6 +110,24 @@ class MethodRegistry:
         self._save_index()
         return db_id
 
+    def delete_by_id(self, db_id: int) -> bool:
+        """Remove a single method by its DB id. Returns True if it existed."""
+        cur = self._conn.execute(
+            "SELECT faiss_pos FROM methods WHERE id=?", (db_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+
+        faiss_pos = row[0]
+        self._conn.execute("DELETE FROM methods WHERE id=?", (db_id,))
+        self._conn.commit()
+
+        if faiss_pos is not None:
+            self._id_map.pop(faiss_pos, None)
+        self._save_index()
+        return True
+
     def delete_by_file(self, file_path: str) -> int:
         """Remove all methods for a file. Returns count removed."""
         cur = self._conn.execute(
