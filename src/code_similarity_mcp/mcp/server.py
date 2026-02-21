@@ -13,6 +13,7 @@ from code_similarity_mcp.embeddings.generator import EmbeddingGenerator
 from code_similarity_mcp.index.registry import MethodRegistry
 from code_similarity_mcp.normalizer import normalize_code
 from code_similarity_mcp.parser.registry import SUPPORTED_EXTENSIONS, get_parser
+from code_similarity_mcp.similarity.filter import FilterPipeline
 from code_similarity_mcp.similarity.scorer import SimilarityScorer
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,7 @@ log = logging.getLogger("code-similarity-mcp")
 app = FastMCP("code-similarity-mcp")
 _generator = EmbeddingGenerator()
 _scorer = SimilarityScorer()
+_filter = FilterPipeline()
 
 _DEFAULT_INDEX_DIR = Path.home() / ".code-similarity-mcp" / "index"
 
@@ -185,7 +187,9 @@ def analyze_new_code(
             "dependencies": method.dependencies,
         }
 
-        raw_candidates = registry.search(embedding, top_k=top_k * 3)
+        valid_ids = _filter.get_candidate_ids(registry, query)
+        log.debug("Method '%s': %d candidate IDs from fast filter", method.name, len(valid_ids))
+        raw_candidates = registry.search(embedding, top_k=top_k * 3, allowed_ids=valid_ids)
         scored = _scorer.score_candidates(query, raw_candidates)[:top_k]
         log.debug("Method '%s': %d raw candidates, %d scored", method.name, len(raw_candidates), len(scored))
 

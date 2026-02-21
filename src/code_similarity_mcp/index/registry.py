@@ -151,9 +151,20 @@ class MethodRegistry:
     # Query operations
     # ------------------------------------------------------------------
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 10) -> list[dict]:
-        """Return top-k similar methods by embedding similarity."""
+    def search(
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 10,
+        allowed_ids: set[int] | None = None,
+    ) -> list[dict]:
+        """Return top-k similar methods by embedding similarity.
+
+        If *allowed_ids* is provided, only methods whose DB id is in that set
+        are returned.  Pass an empty set to short-circuit (returns []).
+        """
         if self._faiss_index.ntotal == 0:
+            return []
+        if allowed_ids is not None and not allowed_ids:
             return []
         vec = query_embedding.reshape(1, -1).astype(np.float32)
         k = min(top_k, self._faiss_index.ntotal)
@@ -164,11 +175,43 @@ class MethodRegistry:
             if pos < 0 or pos not in self._id_map:
                 continue
             db_id = self._id_map[pos]
+            if allowed_ids is not None and db_id not in allowed_ids:
+                continue
             row = self._get_method_by_id(db_id)
             if row:
                 row["embedding_score"] = float(score)
                 results.append(row)
         return results
+
+    def filter_by_criteria(
+        self, language: str, param_count: int, loc: int
+    ) -> set[int]:
+        """Return DB IDs matching: same language, param count ±1, LOC ±30%.
+
+        Language and LOC bounds are applied via SQL; param count is checked
+        in Python because parameters are stored as a JSON array.
+        """
+        if loc > 0:
+            loc_min = int(loc * 0.7)
+            loc_max = int(loc / 0.7) + 1
+            cur = self._conn.execute(
+                """SELECT id, parameters FROM methods
+                   WHERE language=?
+                   AND (end_line - start_line + 1) BETWEEN ? AND ?""",
+                (language, loc_min, loc_max),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT id, parameters FROM methods WHERE language=?",
+                (language,),
+            )
+
+        result: set[int] = set()
+        for row_id, params_json in cur.fetchall():
+            params = json.loads(params_json)
+            if abs(len(params) - param_count) <= 1:
+                result.add(row_id)
+        return result
 
     def get_by_file(self, file_path: str) -> list[dict]:
         cur = self._conn.execute(

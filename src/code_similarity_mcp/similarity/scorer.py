@@ -5,6 +5,8 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass
 
+from .filter import FilterPipeline
+
 
 @dataclass
 class SimilarityResult:
@@ -30,11 +32,13 @@ class SimilarityScorer:
         w_embedding: float = 0.5,
         w_ast: float = 0.3,
         w_structural: float = 0.2,
+        filter_pipeline: FilterPipeline | None = None,
     ) -> None:
         self.threshold = threshold
         self.w_embedding = w_embedding
         self.w_ast = w_ast
         self.w_structural = w_structural
+        self._filter = filter_pipeline if filter_pipeline is not None else FilterPipeline()
 
     def score_candidates(
         self,
@@ -48,7 +52,7 @@ class SimilarityScorer:
         results: list[SimilarityResult] = []
 
         for cand in candidates:
-            if not self._passes_fast_filter(query, cand):
+            if not self._filter.passes(query, cand):
                 continue
 
             exact = query["code_hash"] == cand["code_hash"]
@@ -92,24 +96,6 @@ class SimilarityScorer:
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results
-
-    # ------------------------------------------------------------------
-    # Fast filter
-    # ------------------------------------------------------------------
-
-    def _passes_fast_filter(self, query: dict, cand: dict) -> bool:
-        if query["language"] != cand["language"]:
-            return False
-        if abs(len(query["parameters"]) - len(cand["parameters"])) > 1:
-            return False
-        q_loc = query["end_line"] - query["start_line"] + 1
-        c_loc = cand["end_line"] - cand["start_line"] + 1
-        if q_loc == 0 or c_loc == 0:
-            return True
-        ratio = min(q_loc, c_loc) / max(q_loc, c_loc)
-        if ratio < 0.7:
-            return False
-        return True
 
     # ------------------------------------------------------------------
     # Scoring helpers
