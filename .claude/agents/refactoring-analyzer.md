@@ -7,59 +7,60 @@ color: purple
 
 ## Tools Available
 
-- `mcp__code-similarity__index_repository` — index a repository's source files
-- `mcp__code-similarity__analyze_project` — compare all indexed methods for similarity
-- `mcp__code-similarity__analyze_new_code` — check a specific snippet against the index
+- `Bash` — run the similarity report script and capture JSON output
+- `Read` — inspect specific source files to verify findings (Phase 4 only)
 
 ## Workflow
 
-### Phase 1: Index
+### Phase 1: Run
 
-Call `mcp__code-similarity__index_repository`:
-- `repository_root`: absolute path provided by user
-- `index_dir`: use user-provided value or omit for default
-- `force_reindex`: false unless user requests fresh scan
+Execute the similarity report script from the project root:
 
-Confirm: log `files_processed` and `methods_indexed` from result.
+```
+.venv/Scripts/python scripts/similarity_report.py <repository_root> [--index-dir <dir>] [--threshold 0.85] [--top-k 5] [--force-reindex]
+```
 
-### Phase 2: Analyze
+- Redirect stderr to `/dev/null` to suppress model-load noise: append `2>/dev/null`
+- Parse the JSON output. Keys: `repository_root`, `index`, `analysis`
+- `index`: `files_processed`, `methods_indexed`, `index_dir`
+- `analysis`: `total_methods`, `similar_pairs[]`
 
-Call `mcp__code-similarity__analyze_project`:
-- `index_dir`: same as Phase 1
-- `threshold`: 0.85 (default) unless user specified otherwise
-- `top_k`: 5 (default)
+If `index.error` is present: report the error and stop.
+If `index.methods_indexed` is 0: report "No methods indexed" and stop.
 
-If the user provided a specific code snippet instead of a full project, call `mcp__code-similarity__analyze_new_code` with `code_snippet` and `language`.
+### Phase 2: Evaluate Pairs
 
-### Domain Detection
+Read `analysis.similar_pairs`. Each pair has: `method_a`, `method_b`, `score`, `exact_match`, `embedding_similarity`, `ast_similarity`, `differences`, `refactoring_hints`.
 
-Infer domain from each method's file path before evaluating pairs:
+#### Domain Detection
+
+Infer domain from each method's file path:
 - Domain = first meaningful directory segment under `src/`, `lib/`, `app/`, or repo root
   - `src/billing/invoices.py` → domain `billing`
   - `src/auth/tokens.py` → domain `auth`
   - `lib/utils/strings.py` → domain `utils`
 - **Same domain**: both methods share the same top-level segment
-- **Cross domain**: methods belong to different top-level segments
-- **Ambiguous** (flat repo, no clear segments): treat as same domain
+- **Cross domain**: methods belong to different segments
+- **Ambiguous** (flat repo): treat as same domain
 
-### Phase 3: Evaluate Pairs
-
-Classification is 2D: score × domain relationship.
+#### Classification
 
 | Score / `exact_match` | Same Domain | Cross Domain |
 |-----------------------|-------------|--------------|
-| `exact_match=true` | **Consolidate** — safe, direct duplicate | **Warn** — shared layer required; evaluate necessity |
-| ≥ 0.90 | **Extract helper** within the domain module | **Caution** — only if logic is provably generic |
-| 0.75–0.89 | **Review** — may serve different purposes | **Likely coincidental** — do not recommend merge |
+| `exact_match=true` | **Consolidate** — direct duplicate | **Warn** — shared layer required |
+| ≥ 0.90 | **Extract helper** within domain | **Caution** — only if provably generic |
+| 0.75–0.89 | **Review** — may serve different purposes | **Likely coincidental** — do not merge |
 | < 0.75 | Note only | Skip entirely |
 
-**Cross-domain refactoring cost:** new shared package, inter-domain import dependency, coupling risk.
-Recommend a shared layer only when **all three** hold:
-1. Duplicated logic contains no domain-specific names, types, or business rules
-2. Three or more domains use the same logic (not just two)
-3. A shared utility layer already exists or is explicitly planned
+Cross-domain refactoring: recommend shared layer only when **all three** hold:
+1. No domain-specific names, types, or business rules
+2. Three or more domains use the same logic
+3. A shared utility layer already exists or is planned
 
-Always prefer fewer, high-confidence recommendations over exhaustive lists.
+### Phase 3: Verify (optional)
+
+Use `Read` to inspect specific source files only if a finding needs confirmation.
+**Do not read files speculatively** — only to verify a specific pair from Phase 2.
 
 ### Phase 4: Report
 
@@ -79,8 +80,8 @@ Output exactly this structure:
 - **Method A:** `<file>:<line>` — `<method>()`
 - **Method B:** `<file>:<line>` — `<method>()`
 - **Score:** `<score>` | **Exact match:** `<true/false>`
-- **Action:** `<consolidate into single function / extract shared helper / introduce base class / etc.>`
-- **Rationale:** `<one sentence explaining why>`
+- **Action:** `<consolidate / extract helper / introduce base class / etc.>`
+- **Rationale:** `<one sentence>`
 - **Hints:** `<refactoring_hints from MCP if any>`
 
 _(repeat for each recommended pair, highest score first)_
@@ -93,16 +94,17 @@ _(repeat for each recommended pair, highest score first)_
 
 ### Summary
 
-`<2–3 sentence executive summary: total pairs found, how many are actionable, highest-priority action>`
+`<2–3 sentence executive summary>`
 
 ---
 
 ## Rules
 
+- **Script-first**: Run the script in Phase 1 before doing anything else. Do not read, glob, or grep source files for discovery.
+- **Read only to verify**: `Read` is permitted in Phase 3 only for confirming a specific finding already returned by the script.
 - Never rewrite or modify code — analysis and recommendations only
 - Sort recommendations: same-domain pairs first within each score tier, cross-domain pairs last
 - Do not flag cross-domain pairs as actionable unless all three shared-layer conditions are met
 - If `similar_pairs` is empty: report "No similar methods found above threshold `<threshold>`"
-- If `methods_indexed` is 0: report the error and stop
-- Include `refactoring_hints` from MCP verbatim when present
+- Include `refactoring_hints` verbatim when present
 - Use file paths relative to `repository_root` for readability
