@@ -61,9 +61,7 @@ class SimilarityScorer:
                 ast_score = 1.0
             else:
                 embedding_score = cand.get("embedding_score", 0.0)
-                ast_score = self._ast_similarity(
-                    query["normalized_code"], cand["normalized_code"]
-                )
+                ast_score = self._ast_similarity(query, cand)
 
             structural = self._structural_score(query, cand)
             final = (
@@ -101,9 +99,24 @@ class SimilarityScorer:
     # Scoring helpers
     # ------------------------------------------------------------------
 
-    def _ast_similarity(self, a: str, b: str) -> float:
-        """SequenceMatcher ratio on normalized code lines."""
-        return difflib.SequenceMatcher(None, a, b).ratio()
+    def _ast_similarity(self, query: dict, cand: dict) -> float:
+        """Compute AST structural similarity between two method dicts.
+
+        When both dicts carry an ``ast_fingerprint`` (a DFS sequence of node
+        types produced by the parser), the comparison is done on that
+        structural sequence.  If either fingerprint is absent or empty the
+        method falls back to SequenceMatcher on the normalized code string,
+        preserving backwards-compatibility with callers that do not supply a
+        fingerprint.
+        """
+        q_fp: list[str] = query.get("ast_fingerprint") or []
+        c_fp: list[str] = cand.get("ast_fingerprint") or []
+        if q_fp and c_fp:
+            return difflib.SequenceMatcher(None, q_fp, c_fp).ratio()
+        # Fallback: character-level diff on normalized code
+        return difflib.SequenceMatcher(
+            None, query["normalized_code"], cand["normalized_code"]
+        ).ratio()
 
     def _structural_score(self, query: dict, cand: dict) -> float:
         """Simple structural feature similarity."""

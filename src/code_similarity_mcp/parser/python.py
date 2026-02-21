@@ -59,6 +59,25 @@ def _extract_params(params_node, source: bytes) -> list[str]:
     return names
 
 
+def _extract_fingerprint(node) -> list[str]:
+    """Return a DFS sequence of named node types for the given subtree.
+
+    Named nodes carry semantic meaning (e.g. ``function_definition``,
+    ``return_statement``) while anonymous nodes are punctuation/keywords
+    that are less useful for structural comparison.
+    """
+    result: list[str] = []
+    _collect_types(node, result)
+    return result
+
+
+def _collect_types(node, result: list[str]) -> None:
+    if node.is_named:
+        result.append(node.type)
+    for child in node.children:
+        _collect_types(child, result)
+
+
 def _extract_dependencies(func_node, source: bytes, func_name: str) -> list[str]:
     calls: set[str] = set()
     for node in _walk(func_node):
@@ -128,6 +147,7 @@ class PythonParser(BaseParser):
         end_line = node.end_point[0] + 1
         body_code = _node_text(node, source)
         dependencies = _extract_dependencies(node, source, name)
+        ast_fingerprint = _extract_fingerprint(node)
 
         return MethodInfo(
             file_path=file_path,
@@ -140,4 +160,5 @@ class PythonParser(BaseParser):
             start_line=start_line,
             end_line=end_line,
             dependencies=dependencies,
+            ast_fingerprint=ast_fingerprint,
         )

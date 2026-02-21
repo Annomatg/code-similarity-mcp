@@ -45,11 +45,21 @@ class MethodRegistry:
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
                 dependencies TEXT NOT NULL,
-                faiss_pos INTEGER
+                faiss_pos INTEGER,
+                ast_fingerprint TEXT NOT NULL DEFAULT '[]'
             )
         """)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_file ON methods(file_path)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_hash ON methods(code_hash)")
+        # Migrate existing databases that pre-date the ast_fingerprint column
+        existing_cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(methods)").fetchall()
+        }
+        if "ast_fingerprint" not in existing_cols:
+            self._conn.execute(
+                "ALTER TABLE methods ADD COLUMN ast_fingerprint TEXT NOT NULL DEFAULT '[]'"
+            )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -80,8 +90,9 @@ class MethodRegistry:
         cur = self._conn.execute(
             """INSERT INTO methods
                (file_path, language, name, parameters, return_type, body_code,
-                normalized_code, code_hash, start_line, end_line, dependencies, faiss_pos)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                normalized_code, code_hash, start_line, end_line, dependencies,
+                faiss_pos, ast_fingerprint)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 method_info.file_path,
                 method_info.language,
@@ -95,6 +106,7 @@ class MethodRegistry:
                 method_info.end_line,
                 json.dumps(method_info.dependencies),
                 None,  # faiss_pos updated below
+                json.dumps(getattr(method_info, "ast_fingerprint", [])),
             ),
         )
         db_id = cur.lastrowid
@@ -229,6 +241,7 @@ class MethodRegistry:
         d = dict(zip(cols, row))
         d["parameters"] = json.loads(d["parameters"])
         d["dependencies"] = json.loads(d["dependencies"])
+        d["ast_fingerprint"] = json.loads(d.get("ast_fingerprint") or "[]")
         return d
 
     def stats(self) -> dict:

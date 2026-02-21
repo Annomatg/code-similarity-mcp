@@ -21,6 +21,7 @@ class MethodInfo:
     start_line: int
     end_line: int
     dependencies: list[str] = field(default_factory=list)
+    ast_fingerprint: list[str] = field(default_factory=list)  # DFS node-type sequence
 
     @property
     def loc(self) -> int:

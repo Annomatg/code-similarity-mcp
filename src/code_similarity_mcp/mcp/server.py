@@ -185,6 +185,7 @@ def analyze_new_code(
             "start_line": method.start_line,
             "end_line": method.end_line,
             "dependencies": method.dependencies,
+            "ast_fingerprint": method.ast_fingerprint,
         }
 
         valid_ids = _filter.get_candidate_ids(registry, query)
