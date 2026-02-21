@@ -44,6 +44,7 @@ def _normalize_numbers(code: str) -> str:
 
 
 def _normalize_whitespace(code: str) -> str:
+    code = code.replace("\r\n", "\n").replace("\r", "\n")
     code = re.sub(r"[ \t]+", " ", code)
     code = re.sub(r"\n\s*\n+", "\n", code)
     return code.strip()
