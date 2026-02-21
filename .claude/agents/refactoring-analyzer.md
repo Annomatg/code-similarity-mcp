@@ -31,21 +31,35 @@ Call `mcp__code-similarity__analyze_project`:
 
 If the user provided a specific code snippet instead of a full project, call `mcp__code-similarity__analyze_new_code` with `code_snippet` and `language`.
 
+### Domain Detection
+
+Infer domain from each method's file path before evaluating pairs:
+- Domain = first meaningful directory segment under `src/`, `lib/`, `app/`, or repo root
+  - `src/billing/invoices.py` → domain `billing`
+  - `src/auth/tokens.py` → domain `auth`
+  - `lib/utils/strings.py` → domain `utils`
+- **Same domain**: both methods share the same top-level segment
+- **Cross domain**: methods belong to different top-level segments
+- **Ambiguous** (flat repo, no clear segments): treat as same domain
+
 ### Phase 3: Evaluate Pairs
 
-For each pair in `similar_pairs`, classify by score:
+Classification is 2D: score × domain relationship.
 
-| Score | `exact_match` | Classification | Action |
-|-------|--------------|----------------|--------|
-| 1.0 | true | Exact duplicate | Consolidate immediately |
-| ≥ 0.90 | false | Near-duplicate | Extract shared logic |
-| 0.75–0.89 | false | Structurally similar | Review — may serve different purposes |
-| < 0.75 | false | Coincidental | Note only, do not recommend merge |
+| Score / `exact_match` | Same Domain | Cross Domain |
+|-----------------------|-------------|--------------|
+| `exact_match=true` | **Consolidate** — safe, direct duplicate | **Warn** — shared layer required; evaluate necessity |
+| ≥ 0.90 | **Extract helper** within the domain module | **Caution** — only if logic is provably generic |
+| 0.75–0.89 | **Review** — may serve different purposes | **Likely coincidental** — do not recommend merge |
+| < 0.75 | Note only | Skip entirely |
 
-Exclude pairs from recommendations when:
-- Methods have different domain semantics (e.g., `parse_csv` vs `parse_json`)
-- Parameter types/counts differ significantly despite similar structure
-- One is a test helper and the other is production code
+**Cross-domain refactoring cost:** new shared package, inter-domain import dependency, coupling risk.
+Recommend a shared layer only when **all three** hold:
+1. Duplicated logic contains no domain-specific names, types, or business rules
+2. Three or more domains use the same logic (not just two)
+3. A shared utility layer already exists or is explicitly planned
+
+Always prefer fewer, high-confidence recommendations over exhaustive lists.
 
 ### Phase 4: Report
 
@@ -86,7 +100,8 @@ _(repeat for each recommended pair, highest score first)_
 ## Rules
 
 - Never rewrite or modify code — analysis and recommendations only
-- Always sort recommendations by score descending
+- Sort recommendations: same-domain pairs first within each score tier, cross-domain pairs last
+- Do not flag cross-domain pairs as actionable unless all three shared-layer conditions are met
 - If `similar_pairs` is empty: report "No similar methods found above threshold `<threshold>`"
 - If `methods_indexed` is 0: report the error and stop
 - Include `refactoring_hints` from MCP verbatim when present

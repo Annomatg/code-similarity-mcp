@@ -93,6 +93,34 @@ class TestAgentFileStructure:
         body = _AGENT_PATH.read_text(encoding="utf-8")
         assert "empty" in body.lower() or "No similar" in body or "0" in body
 
+    def test_agent_body_has_domain_detection(self):
+        body = _AGENT_PATH.read_text(encoding="utf-8")
+        assert "domain" in body.lower()
+
+    def test_agent_body_distinguishes_same_and_cross_domain(self):
+        body = _AGENT_PATH.read_text(encoding="utf-8")
+        assert "same domain" in body.lower() or "Same Domain" in body
+        assert "cross domain" in body.lower() or "Cross Domain" in body
+
+    def test_agent_body_warns_cross_domain_refactoring_cost(self):
+        body = _AGENT_PATH.read_text(encoding="utf-8")
+        assert "shared layer" in body.lower() or "coupling" in body.lower()
+
+    def test_agent_body_has_shared_layer_conditions(self):
+        """Agent must not recommend cross-domain merges without explicit conditions."""
+        body = _AGENT_PATH.read_text(encoding="utf-8")
+        # Three conditions gate cross-domain recommendations
+        assert "three or more" in body.lower() or "3" in body
+
+    def test_agent_body_prioritises_same_domain_first(self):
+        body = _AGENT_PATH.read_text(encoding="utf-8")
+        assert "same-domain" in body.lower() or "same domain" in body.lower()
+
+    def test_agent_body_does_not_recommend_cross_domain_below_90(self):
+        body = _AGENT_PATH.read_text(encoding="utf-8")
+        # The classification table must mark 0.75-0.89 cross-domain as non-actionable
+        assert "coincidental" in body.lower() or "do not recommend" in body.lower()
+
 
 # ---------------------------------------------------------------------------
 # MCP tool integration tests (validate output format the agent consumes)
