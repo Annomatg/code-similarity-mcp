@@ -78,6 +78,37 @@ def _collect_types(node, result: list[str]) -> None:
         _collect_types(child, result)
 
 
+def _has_abstractmethod_decorator(node, source: bytes) -> bool:
+    """Return True if this function_definition is decorated with @abstractmethod."""
+    parent = node.parent
+    if parent is None or parent.type != "decorated_definition":
+        return False
+    for child in parent.children:
+        if child.type != "decorator":
+            continue
+        decorator_text = _node_text(child, source)
+        # Matches both '@abstractmethod' and '@abc.abstractmethod'
+        if "abstractmethod" in decorator_text:
+            return True
+    return False
+
+
+def _is_stub_body(block_node) -> bool:
+    """Return True if the function body consists only of pass/ellipsis/docstring."""
+    for child in block_node.children:
+        if not child.is_named:
+            continue  # skip punctuation / anonymous tokens
+        if child.type == "pass_statement":
+            continue
+        if child.type == "expression_statement":
+            named_inner = [c for c in child.children if c.is_named]
+            if len(named_inner) == 1 and named_inner[0].type in ("ellipsis", "string"):
+                continue
+        # Anything else is a real statement — not a stub
+        return False
+    return True
+
+
 def _extract_dependencies(func_node, source: bytes, func_name: str) -> list[str]:
     calls: set[str] = set()
     for node in _walk(func_node):
@@ -131,6 +162,7 @@ class PythonParser(BaseParser):
         name: str | None = None
         params: list[str] = []
         return_type: str | None = None
+        block_node = None
 
         for child in node.children:
             if child.type == "identifier":
@@ -139,9 +171,15 @@ class PythonParser(BaseParser):
                 params = _extract_params(child, source)
             elif child.type == "type":
                 return_type = _node_text(child, source)
+            elif child.type == "block":
+                block_node = child
 
         if name is None:
             return None
+
+        is_stub = _has_abstractmethod_decorator(node, source) or (
+            block_node is not None and _is_stub_body(block_node)
+        )
 
         start_line = node.start_point[0] + 1   # 1-based
         end_line = node.end_point[0] + 1
@@ -161,4 +199,5 @@ class PythonParser(BaseParser):
             end_line=end_line,
             dependencies=dependencies,
             ast_fingerprint=ast_fingerprint,
+            is_stub=is_stub,
         )

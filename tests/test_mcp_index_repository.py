@@ -226,3 +226,66 @@ def test_two_repos_use_separate_indexes(tmp_path):
 
     assert data_a["methods_indexed"] == 2
     assert data_b["methods_indexed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: stub filtering
+# ---------------------------------------------------------------------------
+
+_ABSTRACT_PY = """\
+from abc import ABC, abstractmethod
+
+
+class Shape(ABC):
+    @abstractmethod
+    def area(self):
+        pass
+
+    @abstractmethod
+    def perimeter(self):
+        ...
+
+    def describe(self):
+        return f"I am a {type(self).__name__}"
+"""
+
+_STUB_ONLY_PY = """\
+def placeholder():
+    pass
+
+
+def also_placeholder():
+    ...
+
+
+def real_function(a, b):
+    return a + b
+"""
+
+
+def test_abstract_methods_not_indexed(tmp_path):
+    """Abstract methods must be skipped; concrete methods must be indexed."""
+    _write(tmp_path / "shapes.py", _ABSTRACT_PY)
+    index_dir = str(tmp_path / "index")
+    data = json.loads(index_repository(str(tmp_path), index_dir=index_dir))
+    # Only describe() is concrete; area() and perimeter() are abstract stubs
+    assert data["methods_indexed"] == 1
+
+
+def test_pass_and_ellipsis_stubs_not_indexed(tmp_path):
+    """pass-only and ...-only methods must be skipped during indexing."""
+    _write(tmp_path / "stubs.py", _STUB_ONLY_PY)
+    index_dir = str(tmp_path / "index")
+    data = json.loads(index_repository(str(tmp_path), index_dir=index_dir))
+    # Only real_function is non-stub
+    assert data["methods_indexed"] == 1
+
+
+def test_mixed_stub_and_real_count(tmp_path):
+    """Files with both stubs and real methods count only real methods."""
+    _write(tmp_path / "module.py", _ABSTRACT_PY)
+    _write(tmp_path / "stubs.py", _STUB_ONLY_PY)
+    index_dir = str(tmp_path / "index")
+    data = json.loads(index_repository(str(tmp_path), index_dir=index_dir))
+    # describe() from shapes.py + real_function() from stubs.py = 2
+    assert data["methods_indexed"] == 2

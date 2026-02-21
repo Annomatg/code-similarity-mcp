@@ -111,6 +111,9 @@ def index_repository(
 
             log.debug("  %s: %d methods", file_path.name, len(methods))
             for method in methods:
+                if method.is_stub:
+                    log.debug("  Skipping stub: %s", method.name)
+                    continue
                 method.normalized_code = normalize_code(method.body_code, lang)
                 embedding = _generator.encode_one(method.normalized_code)
                 registry.add_method(method, embedding)

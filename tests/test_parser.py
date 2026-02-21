@@ -351,6 +351,106 @@ class TestEdgeCases:
 
 
 # ---------------------------------------------------------------------------
+# Stub detection
+# ---------------------------------------------------------------------------
+
+class TestStubDetection:
+    def test_real_method_is_not_stub(self):
+        methods = parse("""\
+            def add(a, b):
+                return a + b
+        """)
+        assert methods[0].is_stub is False
+
+    def test_pass_only_body_is_stub(self):
+        methods = parse("""\
+            def noop():
+                pass
+        """)
+        assert methods[0].is_stub is True
+
+    def test_ellipsis_only_body_is_stub(self):
+        methods = parse("""\
+            def noop():
+                ...
+        """)
+        assert methods[0].is_stub is True
+
+    def test_docstring_only_body_is_stub(self):
+        methods = parse('''\
+            def describe():
+                """Returns nothing."""
+        ''')
+        assert methods[0].is_stub is True
+
+    def test_docstring_then_pass_is_stub(self):
+        methods = parse('''\
+            def describe():
+                """Does nothing."""
+                pass
+        ''')
+        assert methods[0].is_stub is True
+
+    def test_docstring_then_ellipsis_is_stub(self):
+        methods = parse('''\
+            def describe():
+                """Does nothing."""
+                ...
+        ''')
+        assert methods[0].is_stub is True
+
+    def test_abstractmethod_decorator_is_stub(self):
+        methods = parse("""\
+            class Base:
+                @abstractmethod
+                def process(self, data):
+                    pass
+        """)
+        m = next(m for m in methods if m.name == "process")
+        assert m.is_stub is True
+
+    def test_abc_abstractmethod_decorator_is_stub(self):
+        methods = parse("""\
+            class Base:
+                @abc.abstractmethod
+                def process(self, data):
+                    pass
+        """)
+        m = next(m for m in methods if m.name == "process")
+        assert m.is_stub is True
+
+    def test_abstractmethod_with_real_body_still_stub(self):
+        """@abstractmethod takes precedence even if body has code."""
+        methods = parse("""\
+            class Base:
+                @abstractmethod
+                def compute(self, x):
+                    return x * 2
+        """)
+        m = next(m for m in methods if m.name == "compute")
+        assert m.is_stub is True
+
+    def test_real_method_with_decorator_is_not_stub(self):
+        methods = parse("""\
+            class Service:
+                @property
+                def value(self):
+                    return self._value
+        """)
+        m = next(m for m in methods if m.name == "value")
+        assert m.is_stub is False
+
+    def test_method_with_real_body_is_not_stub(self):
+        methods = parse("""\
+            def calculate(a, b):
+                x = a + b
+                y = x * 2
+                return y
+        """)
+        assert methods[0].is_stub is False
+
+
+# ---------------------------------------------------------------------------
 # Registry integration
 # ---------------------------------------------------------------------------
 

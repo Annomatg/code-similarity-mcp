@@ -22,6 +22,7 @@ class MethodInfo:
     end_line: int
     dependencies: list[str] = field(default_factory=list)
     ast_fingerprint: list[str] = field(default_factory=list)  # DFS node-type sequence
+    is_stub: bool = False  # True for abstract/pass-only/ellipsis-only/docstring-only methods
 
     @property
     def loc(self) -> int:
