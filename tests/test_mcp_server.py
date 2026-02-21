@@ -62,13 +62,13 @@ def test_registered_tools_include_analyze_new_code():
     assert "analyze_new_code" in names
 
 
-def test_exactly_two_tools_registered():
-    """Exactly the two expected tools should be registered."""
+def test_exactly_three_tools_registered():
+    """Exactly the three expected tools should be registered."""
     from code_similarity_mcp.mcp.server import app
 
     tools = asyncio.run(app.list_tools())
     names = {t.name for t in tools}
-    assert names == {"index_repository", "analyze_new_code"}
+    assert names == {"index_repository", "analyze_new_code", "analyze_project"}
 
 
 def test_index_repository_tool_has_description():

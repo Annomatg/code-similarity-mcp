@@ -219,6 +219,94 @@ def analyze_new_code(
 
 
 # ---------------------------------------------------------------------------
+# Tool: analyze_project
+# ---------------------------------------------------------------------------
+
+@app.tool()
+def analyze_project(
+    index_dir: str | None = None,
+    threshold: float = 0.85,
+    top_k: int = 5,
+) -> str:
+    """
+    Compare all indexed methods against each other and report similar pairs.
+
+    Useful for finding duplicate or highly similar functions within a project
+    that may be candidates for refactoring or consolidation.
+
+    Args:
+        index_dir: Index directory to query (default: ~/.code-similarity-mcp/index).
+        threshold: Minimum similarity score to include a pair (0.0–1.0, default: 0.85).
+        top_k: Maximum number of similar matches to find per method (default: 5).
+
+    Returns:
+        JSON with total_methods count and similar_pairs list. Each pair contains
+        method_a, method_b (with file/method/line), score, exact_match,
+        embedding_similarity, ast_similarity, differences, and refactoring_hints.
+    """
+    log.info("analyze_project called: index_dir=%s threshold=%f top_k=%d",
+             index_dir, threshold, top_k)
+
+    registry = _get_registry(index_dir)
+    all_methods = registry.get_all_methods()
+
+    if not all_methods:
+        registry.close()
+        log.info("analyze_project: empty index, returning 0 pairs")
+        return json.dumps({"total_methods": 0, "similar_pairs": []})
+
+    seen_pairs: set[tuple[int, int]] = set()
+    similar_pairs: list[dict] = []
+
+    for method in all_methods:
+        faiss_pos = method.get("faiss_pos")
+        embedding = registry.get_embedding(faiss_pos)
+        if embedding is None:
+            continue
+
+        # Get candidate IDs via the fast filter; exclude self
+        valid_ids = _filter.get_candidate_ids(registry, method)
+        valid_ids.discard(method["id"])
+        if not valid_ids:
+            continue
+
+        raw_candidates = registry.search(embedding, top_k=top_k * 3, allowed_ids=valid_ids)
+        scored = _scorer.score_candidates(method, raw_candidates)[:top_k]
+
+        for result in scored:
+            pair_key = (min(method["id"], result.db_id), max(method["id"], result.db_id))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+
+            similar_pairs.append({
+                "method_a": {
+                    "file": method["file_path"],
+                    "method": method["name"],
+                    "line": method["start_line"],
+                },
+                "method_b": {
+                    "file": result.file_path,
+                    "method": result.name,
+                    "line": result.start_line,
+                },
+                "score": result.score,
+                "exact_match": result.exact_match,
+                "embedding_similarity": result.embedding_score,
+                "ast_similarity": result.ast_score,
+                "differences": result.differences,
+                "refactoring_hints": result.refactoring_hints,
+            })
+
+    similar_pairs.sort(key=lambda p: p["score"], reverse=True)
+
+    registry.close()
+    log.info("analyze_project done: %d methods, %d similar pairs found",
+             len(all_methods), len(similar_pairs))
+    return json.dumps({"total_methods": len(all_methods), "similar_pairs": similar_pairs}, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

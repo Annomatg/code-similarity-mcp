@@ -244,6 +244,19 @@ class MethodRegistry:
         d["ast_fingerprint"] = json.loads(d.get("ast_fingerprint") or "[]")
         return d
 
+    def get_all_methods(self) -> list[dict]:
+        """Return all methods stored in the database."""
+        cur = self._conn.execute("SELECT * FROM methods")
+        return [self._row_to_dict(r) for r in cur.fetchall()]
+
+    def get_embedding(self, faiss_pos: int) -> np.ndarray | None:
+        """Reconstruct the stored embedding vector for a given FAISS position."""
+        if faiss_pos is None or faiss_pos < 0 or faiss_pos >= self._faiss_index.ntotal:
+            return None
+        vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+        self._faiss_index.reconstruct(faiss_pos, vec)
+        return vec
+
     def stats(self) -> dict:
         cur = self._conn.execute("SELECT COUNT(*) FROM methods")
         count = cur.fetchone()[0]
