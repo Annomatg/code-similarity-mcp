@@ -17,13 +17,15 @@ color: purple
 Execute the similarity report script from the project root:
 
 ```
-.venv/Scripts/python scripts/similarity_report.py <repository_root> [--index-dir <dir>] [--threshold 0.85] [--top-k 5] [--force-reindex]
+.venv/Scripts/python scripts/similarity_report.py <repository_root> [--index-dir <dir>] [--threshold 0.85] [--top-k 5] [--min-lines 4] [--force-reindex]
 ```
 
 - Redirect stderr to `/dev/null` to suppress model-load noise: append `2>/dev/null`
 - Parse the JSON output. Keys: `repository_root`, `index`, `analysis`
 - `index`: `files_processed`, `methods_indexed`, `index_dir`
 - `analysis`: `total_methods`, `similar_pairs[]`
+
+`--min-lines 4` (default) automatically excludes trivial getters, setters, and stubs from comparisons. They remain indexed for `analyze_new_code` but do not appear in `similar_pairs`.
 
 If `index.error` is present: report the error and stop.
 If `index.methods_indexed` is 0: report "No methods indexed" and stop.

@@ -69,17 +69,20 @@ class TestAgentFileStructure:
         fm = _parse_frontmatter(_AGENT_PATH.read_text(encoding="utf-8"))
         assert fm.get("color"), "color field is required"
 
-    def test_agent_body_references_index_repository_tool(self):
+    def test_agent_body_references_similarity_pipeline(self):
+        """Agent uses the similarity_report.py script to invoke the MCP tools."""
         body = _AGENT_PATH.read_text(encoding="utf-8")
-        assert "mcp__code-similarity__index_repository" in body
+        assert "similarity_report.py" in body
 
-    def test_agent_body_references_analyze_project_tool(self):
+    def test_agent_body_references_analyze_project_param(self):
+        """Agent instructions must mention analyze_project output or its key fields."""
         body = _AGENT_PATH.read_text(encoding="utf-8")
-        assert "mcp__code-similarity__analyze_project" in body
+        assert "analyze_project" in body or "similar_pairs" in body
 
-    def test_agent_body_references_analyze_new_code_tool(self):
+    def test_agent_body_references_index_step(self):
+        """Agent must describe the indexing step."""
         body = _AGENT_PATH.read_text(encoding="utf-8")
-        assert "mcp__code-similarity__analyze_new_code" in body
+        assert "index" in body.lower()
 
     def test_agent_body_has_workflow(self):
         body = _AGENT_PATH.read_text(encoding="utf-8")
@@ -132,11 +135,15 @@ from code_similarity_mcp.mcp.server import analyze_project, index_repository
 
 _SIMILAR_PY = """\
 def add(a, b):
-    return a + b
+    total = a + b
+    x = total
+    return x
 
 
 def sum_values(x, y):
-    return x + y
+    total = x + y
+    v = total
+    return v
 """
 
 _DISTINCT_PY = """\
@@ -250,14 +257,19 @@ class TestMcpOutputFormatForAgent:
         """Agent relies on descending order to present highest-priority recommendations first."""
         src = """\
 def add(a, b):
-    return a + b
+    total = a + b
+    x = total
+    return x
 
 def sum_values(x, y):
-    return x + y
+    total = x + y
+    v = total
+    return v
 
 def multiply(a, b):
     result = a * b
-    return result
+    squared = result * result
+    return squared
 """
         index_dir = _index(tmp_path, src)
         data = json.loads(analyze_project(index_dir=index_dir))

@@ -230,6 +230,7 @@ def analyze_project(
     index_dir: str | None = None,
     threshold: float = 0.85,
     top_k: int = 5,
+    min_lines: int = 4,
 ) -> str:
     """
     Compare all indexed methods against each other and report similar pairs.
@@ -241,14 +242,19 @@ def analyze_project(
         index_dir: Index directory to query (default: ~/.code-similarity-mcp/index).
         threshold: Minimum similarity score to include a pair (0.0–1.0, default: 0.85).
         top_k: Maximum number of similar matches to find per method (default: 5).
+        min_lines: Minimum number of lines a method must have to participate in
+            comparisons (default: 4). Methods shorter than this threshold are
+            skipped as both queries and candidates — they remain in the index for
+            use with analyze_new_code. This prevents trivial getters/setters from
+            generating low-value similarity pairs.
 
     Returns:
         JSON with total_methods count and similar_pairs list. Each pair contains
         method_a, method_b (with file/method/line), score, exact_match,
         embedding_similarity, ast_similarity, differences, and refactoring_hints.
     """
-    log.info("analyze_project called: index_dir=%s threshold=%f top_k=%d",
-             index_dir, threshold, top_k)
+    log.info("analyze_project called: index_dir=%s threshold=%f top_k=%d min_lines=%d",
+             index_dir, threshold, top_k, min_lines)
 
     registry = _get_registry(index_dir)
     all_methods = registry.get_all_methods()
@@ -258,18 +264,30 @@ def analyze_project(
         log.info("analyze_project: empty index, returning 0 pairs")
         return json.dumps({"total_methods": 0, "similar_pairs": []})
 
+    # Filter out methods below the line threshold — they remain in the index
+    # but are excluded from both query and candidate roles in this run.
+    eligible_methods = [
+        m for m in all_methods
+        if m["end_line"] - m["start_line"] + 1 >= min_lines
+    ]
+    eligible_ids = {m["id"] for m in eligible_methods}
+
+    log.debug("analyze_project: %d total methods, %d eligible (min_lines=%d)",
+              len(all_methods), len(eligible_methods), min_lines)
+
     seen_pairs: set[tuple[int, int]] = set()
     similar_pairs: list[dict] = []
 
-    for method in all_methods:
+    for method in eligible_methods:
         faiss_pos = method.get("faiss_pos")
         embedding = registry.get_embedding(faiss_pos)
         if embedding is None:
             continue
 
-        # Get candidate IDs via the fast filter; exclude self
+        # Get candidate IDs via the fast filter; exclude self and short methods
         valid_ids = _filter.get_candidate_ids(registry, method)
         valid_ids.discard(method["id"])
+        valid_ids &= eligible_ids
         if not valid_ids:
             continue
 
@@ -277,6 +295,8 @@ def analyze_project(
         scored = _scorer.score_candidates(method, raw_candidates)[:top_k]
 
         for result in scored:
+            if result.score < threshold:
+                continue
             pair_key = (min(method["id"], result.db_id), max(method["id"], result.db_id))
             if pair_key in seen_pairs:
                 continue
@@ -304,8 +324,8 @@ def analyze_project(
     similar_pairs.sort(key=lambda p: p["score"], reverse=True)
 
     registry.close()
-    log.info("analyze_project done: %d methods, %d similar pairs found",
-             len(all_methods), len(similar_pairs))
+    log.info("analyze_project done: %d methods (%d eligible), %d similar pairs found",
+             len(all_methods), len(eligible_methods), len(similar_pairs))
     return json.dumps({"total_methods": len(all_methods), "similar_pairs": similar_pairs}, indent=2)
 
 

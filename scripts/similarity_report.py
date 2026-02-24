@@ -7,6 +7,7 @@ Options:
     --index-dir   DIR      Where to store the index (default: ~/.code-similarity-mcp/index)
     --threshold   FLOAT    Minimum similarity score to report (default: 0.85)
     --top-k       INT      Max similar matches per method (default: 5)
+    --min-lines   INT      Skip methods shorter than this many lines (default: 4)
     --force-reindex        Re-index even if files are already indexed
 
 Output:
@@ -33,6 +34,7 @@ def main() -> None:
     parser.add_argument("--index-dir", default=None, help="Index storage directory")
     parser.add_argument("--threshold", type=float, default=0.85, help="Similarity threshold (default: 0.85)")
     parser.add_argument("--top-k", type=int, default=5, help="Max similar matches per method (default: 5)")
+    parser.add_argument("--min-lines", type=int, default=4, help="Skip methods shorter than this many lines (default: 4)")
     parser.add_argument("--force-reindex", action="store_true", help="Re-index all files regardless of cache")
     args = parser.parse_args()
 
@@ -53,6 +55,7 @@ def main() -> None:
             index_dir=args.index_dir,
             threshold=args.threshold,
             top_k=args.top_k,
+            min_lines=args.min_lines,
         )
     )
 

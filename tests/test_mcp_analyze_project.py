@@ -14,29 +14,38 @@ from code_similarity_mcp.mcp.server import analyze_project, index_repository
 # Code fixtures
 # ---------------------------------------------------------------------------
 
-# Two semantically identical functions (normalizer collapses them to same code)
+# Two semantically identical functions (normalizer collapses them to same code) — 4 lines each
 _IDENTICAL_PY = """\
 def add(a, b):
-    return a + b
+    total = a + b
+    x = total
+    return x
 
 
 def sum_values(x, y):
-    return x + y
+    total = x + y
+    v = total
+    return v
 """
 
-# Three functions: two identical + one structurally different
+# Three functions: two identical + one structurally different — 4+ lines each
 _MIXED_PY = """\
 def add(a, b):
-    return a + b
+    total = a + b
+    x = total
+    return x
 
 
 def sum_values(x, y):
-    return x + y
+    total = x + y
+    v = total
+    return v
 
 
 def multiply(a, b):
     result = a * b
-    return result
+    squared = result * result
+    return squared
 """
 
 # Two functions with very different param counts — fast filter will exclude each other
@@ -51,6 +60,16 @@ def process_data(items, key, value, extra):
         if item.get(key) == value:
             result.append(item[extra])
     return result
+"""
+
+# Two short functions (2 lines each) — below default min_lines threshold
+_SHORT_PY = """\
+def add(a, b):
+    return a + b
+
+
+def sum_two(x, y):
+    return x + y
 """
 
 
@@ -300,7 +319,10 @@ def test_top_k_one_limits_matches_per_method(tmp_path):
     """With top_k=1, each method finds at most 1 similar partner; deduplication
     ensures the total pairs ≤ number of methods."""
     (tmp_path / "many.py").write_text(
-        "\n\n".join(f"def func_{i}(a, b):\n    return a + b" for i in range(6)),
+        "\n\n".join(
+            f"def func_{i}(a, b):\n    total = a + b\n    x = total\n    return x"
+            for i in range(6)
+        ),
         encoding="utf-8",
     )
     index_dir = str(tmp_path / "index")
@@ -354,8 +376,12 @@ def test_total_methods_spans_multiple_files(tmp_path):
 
 def test_cross_file_pairs_are_detected(tmp_path):
     """A similar function split across two files should still be paired."""
-    (tmp_path / "a.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
-    (tmp_path / "b.py").write_text("def sum_values(x, y):\n    return x + y\n", encoding="utf-8")
+    (tmp_path / "a.py").write_text(
+        "def add(a, b):\n    total = a + b\n    x = total\n    return x\n", encoding="utf-8"
+    )
+    (tmp_path / "b.py").write_text(
+        "def sum_values(x, y):\n    total = x + y\n    v = total\n    return v\n", encoding="utf-8"
+    )
     index_dir = str(tmp_path / "index")
     index_repository(str(tmp_path), index_dir=index_dir)
     data = json.loads(analyze_project(index_dir=index_dir))
@@ -363,3 +389,71 @@ def test_cross_file_pairs_are_detected(tmp_path):
     pair = data["similar_pairs"][0]
     # The pair should span two different files
     assert pair["method_a"]["file"] != pair["method_b"]["file"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: min_lines parameter
+# ---------------------------------------------------------------------------
+
+
+def test_min_lines_default_excludes_short_methods(tmp_path):
+    """Default min_lines=4 skips 2-line methods — no pairs produced."""
+    index_dir = _setup_index(tmp_path, _SHORT_PY)
+    data = json.loads(analyze_project(index_dir=index_dir))
+    assert data["similar_pairs"] == []
+
+
+def test_min_lines_one_includes_short_methods(tmp_path):
+    """min_lines=1 allows 2-line methods to be compared."""
+    index_dir = _setup_index(tmp_path, _SHORT_PY)
+    data = json.loads(analyze_project(index_dir=index_dir, min_lines=1))
+    assert len(data["similar_pairs"]) > 0
+
+
+def test_min_lines_at_threshold_produces_pairs(tmp_path):
+    """Methods at exactly min_lines are included in comparisons."""
+    index_dir = _setup_index(tmp_path, _IDENTICAL_PY)
+    data = json.loads(analyze_project(index_dir=index_dir, min_lines=4))
+    assert len(data["similar_pairs"]) > 0
+
+
+def test_min_lines_above_threshold_excludes_all(tmp_path):
+    """Setting min_lines higher than any method's line count produces no pairs."""
+    index_dir = _setup_index(tmp_path, _IDENTICAL_PY)
+    data = json.loads(analyze_project(index_dir=index_dir, min_lines=100))
+    assert data["similar_pairs"] == []
+
+
+def test_min_lines_does_not_affect_total_methods_count(tmp_path):
+    """Filtered methods stay in the index — total_methods reflects the full index."""
+    index_dir = _setup_index(tmp_path, _SHORT_PY)
+    data = json.loads(analyze_project(index_dir=index_dir, min_lines=100))
+    assert data["total_methods"] == 2
+    assert data["similar_pairs"] == []
+
+
+def test_min_lines_excludes_short_candidates(tmp_path):
+    """Short methods are excluded as candidates, not just as queries."""
+    content = """\
+def process(a, b):
+    total = a + b
+    result = total * 2
+    return result
+
+
+def get_x(self):
+    return self._x
+"""
+    index_dir = _setup_index(tmp_path, content)
+    # 'process' is 4 lines (eligible); 'get_x' is 2 lines (excluded as candidate)
+    data = json.loads(analyze_project(index_dir=index_dir, min_lines=4))
+    # Only 'process' is eligible; no eligible candidates to compare with
+    assert data["similar_pairs"] == []
+
+
+def test_min_lines_default_is_four(tmp_path):
+    """Omitting min_lines uses default of 4 — same as passing min_lines=4 explicitly."""
+    index_dir = _setup_index(tmp_path, _IDENTICAL_PY)
+    default_data = json.loads(analyze_project(index_dir=index_dir))
+    explicit_data = json.loads(analyze_project(index_dir=index_dir, min_lines=4))
+    assert default_data["similar_pairs"] == explicit_data["similar_pairs"]
