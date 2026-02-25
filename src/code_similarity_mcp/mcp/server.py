@@ -12,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from code_similarity_mcp.embeddings.generator import EmbeddingGenerator
 from code_similarity_mcp.index.registry import MethodRegistry
 from code_similarity_mcp.normalizer import normalize_code
+from code_similarity_mcp.parser.python import count_statements
 from code_similarity_mcp.parser.registry import SUPPORTED_EXTENSIONS, get_parser
 from code_similarity_mcp.similarity.filter import FilterPipeline
 from code_similarity_mcp.similarity.scorer import SimilarityScorer
@@ -327,6 +328,55 @@ def analyze_project(
     log.info("analyze_project done: %d methods (%d eligible), %d similar pairs found",
              len(all_methods), len(eligible_methods), len(similar_pairs))
     return json.dumps({"total_methods": len(all_methods), "similar_pairs": similar_pairs}, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Tool: find_large_functions
+# ---------------------------------------------------------------------------
+
+@app.tool()
+def find_large_functions(
+    index_dir: str | None = None,
+    min_statements: int = 30,
+) -> str:
+    """
+    Scan an indexed repository and return all functions with more than
+    min_statements statements.  These are candidates for dependency-aware
+    chunking or refactoring.
+
+    Args:
+        index_dir: Index directory to query (default: ~/.code-similarity-mcp/index).
+        min_statements: Minimum statement count threshold, exclusive (default: 30).
+
+    Returns:
+        JSON with large_functions list, each entry containing id, name, file,
+        start_line, end_line, and statement_count.
+    """
+    log.info("find_large_functions called: index_dir=%s min_statements=%d",
+             index_dir, min_statements)
+
+    registry = _get_registry(index_dir)
+    all_methods = registry.get_all_methods()
+    registry.close()
+
+    large: list[dict] = []
+    for method in all_methods:
+        stmt_count = count_statements(method["body_code"])
+        if stmt_count > min_statements:
+            large.append({
+                "id": method["id"],
+                "name": method["name"],
+                "file": method["file_path"],
+                "start_line": method["start_line"],
+                "end_line": method["end_line"],
+                "statement_count": stmt_count,
+            })
+
+    large.sort(key=lambda e: e["statement_count"], reverse=True)
+
+    log.info("find_large_functions done: %d/%d methods exceed %d statements",
+             len(large), len(all_methods), min_statements)
+    return json.dumps({"large_functions": large}, indent=2)
 
 
 # ---------------------------------------------------------------------------

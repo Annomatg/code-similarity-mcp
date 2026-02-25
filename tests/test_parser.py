@@ -5,7 +5,7 @@ import hashlib
 
 import pytest
 
-from code_similarity_mcp.parser.python import PythonParser
+from code_similarity_mcp.parser.python import PythonParser, count_statements
 from code_similarity_mcp.parser.base import MethodInfo
 from code_similarity_mcp.parser.registry import get_parser, SUPPORTED_EXTENSIONS
 
@@ -471,3 +471,128 @@ class TestRegistry:
     def test_unsupported_language_raises(self):
         with pytest.raises(ValueError, match="Unsupported language"):
             get_parser("cobol")
+
+
+# ---------------------------------------------------------------------------
+# count_statements utility
+# ---------------------------------------------------------------------------
+
+class TestCountStatements:
+    def test_single_return_is_one(self):
+        code = "def f():\n    return 1\n"
+        assert count_statements(code) == 2  # function_definition + return_statement
+
+    def test_empty_function_is_one(self):
+        # function_definition itself + pass_statement
+        code = "def f():\n    pass\n"
+        assert count_statements(code) == 2
+
+    def test_sequential_statements(self):
+        code = textwrap.dedent("""\
+            def f(a, b):
+                x = a + b
+                y = x * 2
+                return y
+        """)
+        # function_definition + 2 expression_statements + return_statement = 4
+        assert count_statements(code) == 4
+
+    def test_if_counts_as_one_statement(self):
+        code = textwrap.dedent("""\
+            def f(x):
+                if x > 0:
+                    return x
+                return 0
+        """)
+        # function_definition + if_statement + return (inside if) + return = 4
+        assert count_statements(code) == 4
+
+    def test_for_loop_counts_as_one(self):
+        code = textwrap.dedent("""\
+            def f(items):
+                for item in items:
+                    print(item)
+        """)
+        # function_definition + for_statement + expression_statement = 3
+        assert count_statements(code) == 3
+
+    def test_nested_control_flow_counted_recursively(self):
+        code = textwrap.dedent("""\
+            def f(items):
+                result = []
+                for item in items:
+                    if item > 0:
+                        result.append(item)
+                return result
+        """)
+        # function_definition + expression_stmt (result=[]) + for_stmt
+        # + if_stmt + expression_stmt (append) + return_stmt = 6
+        assert count_statements(code) == 6
+
+    def test_while_loop_counted(self):
+        code = textwrap.dedent("""\
+            def f(n):
+                while n > 0:
+                    n -= 1
+                return n
+        """)
+        # function_definition + while_statement + expression_statement + return_statement = 4
+        assert count_statements(code) == 4
+
+    def test_try_except_counted(self):
+        code = textwrap.dedent("""\
+            def f():
+                try:
+                    x = 1
+                except ValueError:
+                    x = 0
+                return x
+        """)
+        # function_definition + try_statement + expression_stmt (x=1)
+        # + expression_stmt (x=0) + return_statement = 5
+        assert count_statements(code) == 5
+
+    def test_import_statement_counted(self):
+        code = textwrap.dedent("""\
+            def f():
+                import os
+                return os.getcwd()
+        """)
+        # function_definition + import_statement + return_statement = 3
+        assert count_statements(code) == 3
+
+    def test_returns_zero_for_empty_string(self):
+        assert count_statements("") == 0
+
+    def test_returns_zero_for_no_statements(self):
+        # Just an expression without a function
+        assert count_statements("x = 1") == 1  # expression_statement
+
+    def test_large_function_exceeds_threshold(self):
+        """A function with many statements should clearly exceed 30."""
+        lines = ["def big_func():"]
+        for i in range(35):
+            lines.append(f"    x_{i} = {i}")
+        code = "\n".join(lines) + "\n"
+        stmt_count = count_statements(code)
+        assert stmt_count > 30
+
+    def test_small_function_below_threshold(self):
+        """A small function with a few statements should be below 30."""
+        code = textwrap.dedent("""\
+            def small(a, b):
+                x = a + b
+                return x
+        """)
+        assert count_statements(code) <= 30
+
+    def test_nested_function_definition_counted(self):
+        """A nested function_definition inside a function counts as a statement."""
+        code = textwrap.dedent("""\
+            def outer():
+                def inner():
+                    pass
+                inner()
+        """)
+        # outer function_definition + inner function_definition + pass + expression_stmt = 4
+        assert count_statements(code) == 4

@@ -11,6 +11,34 @@ from .base import BaseParser, MethodInfo
 
 _PY_LANGUAGE = Language(tspython.language())
 
+# Statement node types used for complexity counting
+_STATEMENT_TYPES = frozenset({
+    # Simple statements
+    "expression_statement",
+    "return_statement",
+    "delete_statement",
+    "raise_statement",
+    "pass_statement",
+    "break_statement",
+    "continue_statement",
+    "import_statement",
+    "import_from_statement",
+    "assert_statement",
+    "global_statement",
+    "nonlocal_statement",
+    # Compound statements (header counts as one statement)
+    "if_statement",
+    "for_statement",
+    "while_statement",
+    "try_statement",
+    "with_statement",
+    "match_statement",
+    # Nested definitions inside a function body
+    "function_definition",
+    "class_definition",
+    "decorated_definition",
+})
+
 # Parameter node types whose first identifier child is the name
 _PARAM_TYPES = frozenset({
     "identifier",
@@ -127,6 +155,19 @@ def _extract_dependencies(func_node, source: bytes, func_name: str) -> list[str]
                         name = _node_text(sub, source)
                 calls.add(name)
     return sorted(calls)
+
+
+def count_statements(code: str) -> int:
+    """Count all statement nodes in a Python code snippet (recursive, all depths).
+
+    Uses tree-sitter to parse *code* and walks the resulting AST, counting
+    every node whose type belongs to ``_STATEMENT_TYPES``.  This gives a
+    measure of function complexity that is independent of raw line count.
+    """
+    source = code.encode("utf-8")
+    parser = Parser(_PY_LANGUAGE)
+    tree = parser.parse(source)
+    return sum(1 for node in _walk(tree.root_node) if node.type in _STATEMENT_TYPES)
 
 
 class PythonParser(BaseParser):
