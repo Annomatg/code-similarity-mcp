@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 
 @dataclass
@@ -31,6 +32,16 @@ class MethodInfo:
     @property
     def code_hash(self) -> str:
         return hashlib.sha256(self.normalized_code.encode()).hexdigest()
+
+
+class StatementInfo(NamedTuple):
+    """A single top-level statement extracted from a function body."""
+
+    index: int          # 0-based position in the function body
+    node_type: str      # tree-sitter node type (e.g. "return_statement")
+    start_line: int     # 1-based start line
+    end_line: int       # 1-based end line
+    source_text: str    # raw source text of the statement
 
 
 class BaseParser(ABC):

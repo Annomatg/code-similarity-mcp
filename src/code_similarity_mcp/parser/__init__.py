@@ -1,6 +1,14 @@
 """Parsers for extracting methods from source files."""
 
-from .base import BaseParser, MethodInfo
+from .base import BaseParser, MethodInfo, StatementInfo
+from .python import get_top_level_statements
 from .registry import get_parser, SUPPORTED_EXTENSIONS
 
-__all__ = ["BaseParser", "MethodInfo", "get_parser", "SUPPORTED_EXTENSIONS"]
+__all__ = [
+    "BaseParser",
+    "MethodInfo",
+    "StatementInfo",
+    "get_parser",
+    "get_top_level_statements",
+    "SUPPORTED_EXTENSIONS",
+]

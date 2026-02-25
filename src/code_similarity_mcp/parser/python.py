@@ -7,7 +7,7 @@ from pathlib import Path
 import tree_sitter_python as tspython
 from tree_sitter import Language, Parser
 
-from .base import BaseParser, MethodInfo
+from .base import BaseParser, MethodInfo, StatementInfo
 
 _PY_LANGUAGE = Language(tspython.language())
 
@@ -168,6 +168,62 @@ def count_statements(code: str) -> int:
     parser = Parser(_PY_LANGUAGE)
     tree = parser.parse(source)
     return sum(1 for node in _walk(tree.root_node) if node.type in _STATEMENT_TYPES)
+
+
+def get_top_level_statements(code: str) -> list[StatementInfo]:
+    """Return the ordered list of top-level statements in a Python function body.
+
+    Parses *code* with tree-sitter, locates the first ``function_definition``
+    node, and collects the **direct child** statement nodes of its body block.
+    Statements nested inside compound blocks (e.g. the body of an ``if`` or
+    ``for``) are intentionally excluded — only the outermost statements are
+    returned.
+
+    Args:
+        code: Source text of a Python function (or a module that contains one).
+
+    Returns:
+        A list of :class:`StatementInfo` named-tuples, one per direct child
+        statement of the function body, in source order.  Returns an empty
+        list if no function definition is found in *code*.
+    """
+    source = code.encode("utf-8")
+    parser = Parser(_PY_LANGUAGE)
+    tree = parser.parse(source)
+
+    # Find the first function_definition node
+    func_node = None
+    for node in _walk(tree.root_node):
+        if node.type == "function_definition":
+            func_node = node
+            break
+
+    if func_node is None:
+        return []
+
+    # Locate the block (body) child of the function
+    block_node = None
+    for child in func_node.children:
+        if child.type == "block":
+            block_node = child
+            break
+
+    if block_node is None:
+        return []
+
+    # Collect direct named child statement nodes — do NOT recurse
+    statements: list[StatementInfo] = []
+    for child in block_node.children:
+        if child.is_named and child.type in _STATEMENT_TYPES:
+            statements.append(StatementInfo(
+                index=len(statements),
+                node_type=child.type,
+                start_line=child.start_point[0] + 1,   # 1-based
+                end_line=child.end_point[0] + 1,
+                source_text=_node_text(child, source),
+            ))
+
+    return statements
 
 
 class PythonParser(BaseParser):

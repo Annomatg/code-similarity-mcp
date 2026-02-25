@@ -5,8 +5,8 @@ import hashlib
 
 import pytest
 
-from code_similarity_mcp.parser.python import PythonParser, count_statements
-from code_similarity_mcp.parser.base import MethodInfo
+from code_similarity_mcp.parser.python import PythonParser, count_statements, get_top_level_statements
+from code_similarity_mcp.parser.base import MethodInfo, StatementInfo
 from code_similarity_mcp.parser.registry import get_parser, SUPPORTED_EXTENSIONS
 
 
@@ -596,3 +596,260 @@ class TestCountStatements:
         """)
         # outer function_definition + inner function_definition + pass + expression_stmt = 4
         assert count_statements(code) == 4
+
+
+# ---------------------------------------------------------------------------
+# get_top_level_statements
+# ---------------------------------------------------------------------------
+
+class TestGetTopLevelStatements:
+    # ------------------------------------------------------------------
+    # Basic return type and structure
+    # ------------------------------------------------------------------
+
+    def test_returns_list_of_statement_info(self):
+        code = "def f():\n    pass\n"
+        result = get_top_level_statements(code)
+        assert isinstance(result, list)
+        assert all(isinstance(s, StatementInfo) for s in result)
+
+    def test_no_function_returns_empty_list(self):
+        result = get_top_level_statements("x = 1\n")
+        assert result == []
+
+    def test_empty_string_returns_empty_list(self):
+        assert get_top_level_statements("") == []
+
+    # ------------------------------------------------------------------
+    # Simple single-statement functions
+    # ------------------------------------------------------------------
+
+    def test_pass_statement(self):
+        code = "def f():\n    pass\n"
+        stmts = get_top_level_statements(code)
+        assert len(stmts) == 1
+        assert stmts[0].node_type == "pass_statement"
+
+    def test_return_statement(self):
+        code = "def f():\n    return 1\n"
+        stmts = get_top_level_statements(code)
+        assert len(stmts) == 1
+        assert stmts[0].node_type == "return_statement"
+
+    def test_expression_statement(self):
+        code = "def f():\n    x = 1\n"
+        stmts = get_top_level_statements(code)
+        assert len(stmts) == 1
+        assert stmts[0].node_type == "expression_statement"
+
+    # ------------------------------------------------------------------
+    # Ordering and indices
+    # ------------------------------------------------------------------
+
+    def test_index_is_zero_based(self):
+        code = textwrap.dedent("""\
+            def f(a, b):
+                x = a + b
+                return x
+        """)
+        stmts = get_top_level_statements(code)
+        assert stmts[0].index == 0
+        assert stmts[1].index == 1
+
+    def test_multiple_statements_ordered(self):
+        code = textwrap.dedent("""\
+            def process(items):
+                result = []
+                for item in items:
+                    result.append(item)
+                return result
+        """)
+        stmts = get_top_level_statements(code)
+        assert len(stmts) == 3
+        assert stmts[0].node_type == "expression_statement"
+        assert stmts[1].node_type == "for_statement"
+        assert stmts[2].node_type == "return_statement"
+
+    def test_indices_are_sequential(self):
+        code = textwrap.dedent("""\
+            def f():
+                a = 1
+                b = 2
+                c = 3
+        """)
+        stmts = get_top_level_statements(code)
+        assert [s.index for s in stmts] == [0, 1, 2]
+
+    # ------------------------------------------------------------------
+    # Node types
+    # ------------------------------------------------------------------
+
+    def test_if_statement_type(self):
+        code = textwrap.dedent("""\
+            def f(x):
+                if x > 0:
+                    return x
+                return 0
+        """)
+        stmts = get_top_level_statements(code)
+        assert stmts[0].node_type == "if_statement"
+        assert stmts[1].node_type == "return_statement"
+
+    def test_while_statement_type(self):
+        code = textwrap.dedent("""\
+            def f(n):
+                while n > 0:
+                    n -= 1
+                return n
+        """)
+        stmts = get_top_level_statements(code)
+        assert stmts[0].node_type == "while_statement"
+        assert stmts[1].node_type == "return_statement"
+
+    def test_try_statement_type(self):
+        code = textwrap.dedent("""\
+            def f():
+                try:
+                    x = 1
+                except ValueError:
+                    x = 0
+                return x
+        """)
+        stmts = get_top_level_statements(code)
+        assert stmts[0].node_type == "try_statement"
+        assert stmts[1].node_type == "return_statement"
+
+    def test_nested_function_definition_type(self):
+        code = textwrap.dedent("""\
+            def outer():
+                def inner():
+                    pass
+                return inner
+        """)
+        stmts = get_top_level_statements(code)
+        assert stmts[0].node_type == "function_definition"
+        assert stmts[1].node_type == "return_statement"
+
+    # ------------------------------------------------------------------
+    # Line numbers
+    # ------------------------------------------------------------------
+
+    def test_start_line_1_based(self):
+        code = "def f():\n    return 1\n"
+        stmts = get_top_level_statements(code)
+        assert stmts[0].start_line == 2
+
+    def test_multiline_statement_end_line(self):
+        code = textwrap.dedent("""\
+            def f(x):
+                if x > 0:
+                    return x
+                return 0
+        """)
+        stmts = get_top_level_statements(code)
+        # if_statement spans lines 2-3
+        assert stmts[0].start_line == 2
+        assert stmts[0].end_line == 3
+        # return spans line 4
+        assert stmts[1].start_line == 4
+        assert stmts[1].end_line == 4
+
+    def test_single_line_statement_same_start_end(self):
+        code = "def f():\n    pass\n"
+        stmts = get_top_level_statements(code)
+        s = stmts[0]
+        assert s.start_line == s.end_line
+
+    # ------------------------------------------------------------------
+    # Source text
+    # ------------------------------------------------------------------
+
+    def test_source_text_for_pass(self):
+        code = "def f():\n    pass\n"
+        stmts = get_top_level_statements(code)
+        assert stmts[0].source_text == "pass"
+
+    def test_source_text_for_return(self):
+        code = "def f(a, b):\n    return a + b\n"
+        stmts = get_top_level_statements(code)
+        assert stmts[0].source_text == "return a + b"
+
+    def test_source_text_for_assignment(self):
+        code = "def f():\n    x = 42\n"
+        stmts = get_top_level_statements(code)
+        assert "x = 42" in stmts[0].source_text
+
+    def test_source_text_for_for_loop_includes_header_only(self):
+        """source_text of a for_statement covers its full extent including nested body."""
+        code = textwrap.dedent("""\
+            def f(items):
+                for item in items:
+                    print(item)
+        """)
+        stmts = get_top_level_statements(code)
+        assert stmts[0].node_type == "for_statement"
+        assert "for item in items" in stmts[0].source_text
+        assert "print(item)" in stmts[0].source_text
+
+    # ------------------------------------------------------------------
+    # Nesting: nested statements must NOT appear at top level
+    # ------------------------------------------------------------------
+
+    def test_nested_statements_excluded_from_top_level(self):
+        """Statements inside an if block must not appear as top-level entries."""
+        code = textwrap.dedent("""\
+            def process(items):
+                result = []
+                for item in items:
+                    if item > 0:
+                        result.append(item)
+                return result
+        """)
+        stmts = get_top_level_statements(code)
+        # Only 3 top-level: assignment, for_statement, return_statement
+        assert len(stmts) == 3
+        node_types = [s.node_type for s in stmts]
+        assert "if_statement" not in node_types
+        assert "expression_statement" in node_types   # result = []
+        assert "for_statement" in node_types
+        assert "return_statement" in node_types
+
+    def test_deeply_nested_excluded(self):
+        """Statements nested several levels deep are not at the top level."""
+        code = textwrap.dedent("""\
+            def f(data):
+                for row in data:
+                    for cell in row:
+                        if cell:
+                            process(cell)
+                return True
+        """)
+        stmts = get_top_level_statements(code)
+        assert len(stmts) == 2
+        assert stmts[0].node_type == "for_statement"
+        assert stmts[1].node_type == "return_statement"
+
+    # ------------------------------------------------------------------
+    # First function wins when there are multiple
+    # ------------------------------------------------------------------
+
+    def test_first_function_used_when_multiple(self):
+        code = textwrap.dedent("""\
+            def first():
+                return 1
+
+            def second():
+                return 2
+        """)
+        stmts = get_top_level_statements(code)
+        assert len(stmts) == 1
+        assert stmts[0].source_text == "return 1"
+
+    # ------------------------------------------------------------------
+    # Public API: importable from parser package
+    # ------------------------------------------------------------------
+
+    def test_importable_from_package(self):
+        from code_similarity_mcp.parser import get_top_level_statements as gts, StatementInfo as SI
+        assert callable(gts)
+        assert SI is StatementInfo
