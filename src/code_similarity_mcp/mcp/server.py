@@ -479,14 +479,15 @@ def chunk_repository(
                 file_path=method["file_path"],
                 function_id=method["id"],
             )
-            embeddings = embed_chunks(
-                annotated, method["body_code"], statements, _generator
+            embeddings, norm_texts = embed_chunks(
+                annotated, method["body_code"], statements, _generator,
+                return_texts=True,
             )
 
             # Replace any previously stored chunks for this function.
             registry.delete_chunks_by_function(method["id"])
-            for chunk_info, emb in zip(annotated, embeddings):
-                registry.add_chunk(chunk_info, emb)
+            for chunk_info, emb, norm_code in zip(annotated, embeddings, norm_texts):
+                registry.add_chunk(chunk_info, emb, normalized_code=norm_code)
                 chunks_created += 1
 
             functions_chunked += 1
@@ -678,10 +679,14 @@ def _build_function_map(method: dict, chunks: list[dict]) -> dict:
 
     chunk_entries = []
     for c in sorted_chunks:
-        try:
-            norm_code = _normalized_code_for_chunk(c, method["body_code"], language)
-        except Exception:
-            norm_code = ""
+        # Use the stored normalized_code when available (populated since feature
+        # #29); fall back to on-the-fly recomputation for older index records.
+        norm_code = c.get("normalized_code") or ""
+        if not norm_code:
+            try:
+                norm_code = _normalized_code_for_chunk(c, method["body_code"], language)
+            except Exception:
+                norm_code = ""
 
         chunk_entries.append({
             "chunk_id": c["id"],

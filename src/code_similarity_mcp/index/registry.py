@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -321,7 +322,7 @@ class MethodRegistry:
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                function_id INTEGER NOT NULL,
+                function_id INTEGER NOT NULL REFERENCES methods(id),
                 chunk_index INTEGER NOT NULL,
                 statement_start INTEGER NOT NULL,
                 statement_end INTEGER NOT NULL,
@@ -330,6 +331,10 @@ class MethodRegistry:
                 file_path TEXT NOT NULL,
                 depends_on_chunks TEXT NOT NULL,
                 depended_on_by_chunks TEXT NOT NULL,
+                normalized_code TEXT NOT NULL DEFAULT '',
+                code_hash TEXT NOT NULL DEFAULT '',
+                dependency_links TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 faiss_pos INTEGER
             )
         """)
@@ -339,6 +344,21 @@ class MethodRegistry:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path)"
         )
+        # Migrate existing databases that pre-date the new schema columns.
+        existing_cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(chunks)").fetchall()
+        }
+        for col_name, col_def in [
+            ("normalized_code", "TEXT NOT NULL DEFAULT ''"),
+            ("code_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("dependency_links", "TEXT NOT NULL DEFAULT '[]'"),
+            ("created_at", "TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ]:
+            if col_name not in existing_cols:
+                self._conn.execute(
+                    f"ALTER TABLE chunks ADD COLUMN {col_name} {col_def}"
+                )
         self._conn.commit()
 
     def _load_or_create_chunk_index(self):
@@ -357,14 +377,39 @@ class MethodRegistry:
         faiss.write_index(self._chunks_index, str(self._chunks_faiss_path))
         self._chunk_id_map_path.write_text(json.dumps(self._chunk_id_map))
 
-    def add_chunk(self, chunk_info, embedding: np.ndarray) -> int:
-        """Insert a chunk and its embedding. Returns the chunk DB row id."""
+    def add_chunk(
+        self,
+        chunk_info,
+        embedding: np.ndarray,
+        normalized_code: str = "",
+    ) -> int:
+        """Insert a chunk and its embedding. Returns the chunk DB row id.
+
+        Args:
+            chunk_info: A :class:`~code_similarity_mcp.parser.base.ChunkInfo`
+                instance describing the chunk.
+            embedding: Pre-computed L2-normalised embedding vector (shape
+                ``(384,)``, dtype ``float32``).
+            normalized_code: Normalized source text for this chunk (as produced
+                by ``embed_chunks`` with ``return_texts=True``).  Used to store
+                ``normalized_code`` and to compute ``code_hash``.  Defaults to
+                ``""`` when not supplied (e.g. for legacy callers).
+        """
+        code_hash = (
+            hashlib.sha256(normalized_code.encode()).hexdigest()
+            if normalized_code
+            else ""
+        )
+        dependency_links = json.dumps(chunk_info.depends_on_chunks)
+
         cur = self._conn.execute(
             """INSERT INTO chunks
                (function_id, chunk_index, statement_start, statement_end,
                 statement_indices, function_name, file_path,
-                depends_on_chunks, depended_on_by_chunks, faiss_pos)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                depends_on_chunks, depended_on_by_chunks,
+                normalized_code, code_hash, dependency_links,
+                faiss_pos)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 chunk_info.function_id,
                 chunk_info.chunk_index,
@@ -375,6 +420,9 @@ class MethodRegistry:
                 chunk_info.file_path,
                 json.dumps(chunk_info.depends_on_chunks),
                 json.dumps(chunk_info.depended_on_by_chunks),
+                normalized_code,
+                code_hash,
+                dependency_links,
                 None,  # faiss_pos set below
             ),
         )
@@ -433,6 +481,7 @@ class MethodRegistry:
         d["statement_indices"] = json.loads(d["statement_indices"])
         d["depends_on_chunks"] = json.loads(d["depends_on_chunks"])
         d["depended_on_by_chunks"] = json.loads(d["depended_on_by_chunks"])
+        d["dependency_links"] = json.loads(d.get("dependency_links") or "[]")
         return d
 
     def get_chunk_count(self) -> int:

@@ -270,6 +270,7 @@ def embed_chunks(
     statements: list,
     generator,
     language: str = "python",
+    return_texts: bool = False,
 ) -> list:
     """Generate a normalized embedding for each chunk.
 
@@ -295,14 +296,24 @@ def embed_chunks(
             instance used to produce the 384-dimensional embeddings.
         language: Source language used to select the normalizer (default
             ``"python"``).
+        return_texts: When ``True``, return a ``(embeddings, normalized_texts)``
+            tuple instead of just the embeddings list.  The ``normalized_texts``
+            list contains the normalized string that was encoded for each chunk,
+            in the same order as *chunks*.  Defaults to ``False`` for backward
+            compatibility.
 
     Returns:
-        A :class:`list` of ``numpy.ndarray`` embeddings, one per chunk, in the
-        same order as *chunks*.  Each array has shape ``(384,)`` and dtype
-        ``float32``.  Returns an empty list when *chunks* is empty.
+        When *return_texts* is ``False`` (default): a :class:`list` of
+        ``numpy.ndarray`` embeddings, one per chunk, in the same order as
+        *chunks*.  Each array has shape ``(384,)`` and dtype ``float32``.
+        Returns an empty list when *chunks* is empty.
+
+        When *return_texts* is ``True``: a ``(embeddings, normalized_texts)``
+        tuple where ``embeddings`` is as described above and ``normalized_texts``
+        is a :class:`list` of :class:`str` (one per chunk).
     """
     if not chunks:
-        return []
+        return ([], []) if return_texts else []
 
     from code_similarity_mcp.normalizer.registry import get_normalizer
 
@@ -326,7 +337,10 @@ def embed_chunks(
         texts.append(normalizer.normalize(wrapped))
 
     import numpy as np  # noqa: F401 — ensure numpy is available for callers
-    return list(generator.encode(texts))
+    embeddings = list(generator.encode(texts))
+    if return_texts:
+        return embeddings, texts
+    return embeddings
 
 
 class BaseParser(ABC):

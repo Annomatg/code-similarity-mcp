@@ -204,6 +204,8 @@ def test_stored_chunks_have_required_fields(tmp_path):
         "id", "function_id", "chunk_index", "statement_start", "statement_end",
         "statement_indices", "function_name", "file_path",
         "depends_on_chunks", "depended_on_by_chunks", "faiss_pos",
+        # feature #29: new metadata columns
+        "normalized_code", "code_hash", "dependency_links", "created_at",
     }
     for c in chunks:
         for field in required:
