@@ -8,7 +8,9 @@ import pytest
 from code_similarity_mcp.parser.python import (
     PythonParser, count_statements, get_top_level_statements, build_dependency_graph,
 )
-from code_similarity_mcp.parser.base import DependencyGraph, MethodInfo, StatementInfo, group_into_chunks
+from code_similarity_mcp.parser.base import (
+    DependencyGraph, MethodInfo, StatementInfo, group_into_chunks, annotate_chunks, ChunkInfo,
+)
 from code_similarity_mcp.parser.registry import get_parser, SUPPORTED_EXTENSIONS
 
 
@@ -1802,3 +1804,348 @@ class TestGroupIntoChunks:
         """A single statement always fits in one chunk regardless of max."""
         g = DependencyGraph(data={0: []}, control_flow={0: []}, num_statements=1)
         assert group_into_chunks(g, max_statements_per_chunk=1) == [[0]]
+
+
+# ---------------------------------------------------------------------------
+# annotate_chunks (feature #23)
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotateChunks:
+    """Tests for annotate_chunks — metadata annotation for statement chunks."""
+
+    # ------------------------------------------------------------------
+    # Basic structural tests
+    # ------------------------------------------------------------------
+
+    def test_empty_chunks_returns_empty_list(self):
+        """annotate_chunks([]) → []."""
+        g = DependencyGraph(data={}, control_flow={}, num_statements=0)
+        result = annotate_chunks([], g)
+        assert result == []
+
+    def test_single_chunk_single_stmt(self):
+        """One chunk with one statement gets correct index bounds."""
+        g = DependencyGraph(data={0: []}, control_flow={0: []}, num_statements=1)
+        chunks = [[0]]
+        result = annotate_chunks(chunks, g)
+        assert len(result) == 1
+        ci = result[0]
+        assert isinstance(ci, ChunkInfo)
+        assert ci.chunk_index == 0
+        assert ci.statement_start == 0
+        assert ci.statement_end == 0
+        assert ci.statement_indices == [0]
+
+    def test_single_chunk_multiple_stmts(self):
+        """One chunk with 3 chained statements."""
+        g = DependencyGraph(
+            data={0: [1], 1: [2], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = [[0, 1, 2]]
+        result = annotate_chunks(chunks, g)
+        assert len(result) == 1
+        ci = result[0]
+        assert ci.statement_start == 0
+        assert ci.statement_end == 2
+        assert ci.statement_indices == [0, 1, 2]
+
+    def test_chunk_indices_are_sequential(self):
+        """chunk_index must equal the position of the ChunkInfo in the list."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: [], 3: []},
+            control_flow={0: [], 1: [], 2: [], 3: []},
+            num_statements=4,
+        )
+        chunks = [[0], [1], [2], [3]]
+        result = annotate_chunks(chunks, g)
+        for i, ci in enumerate(result):
+            assert ci.chunk_index == i
+
+    # ------------------------------------------------------------------
+    # statement_start / statement_end / statement_indices
+    # ------------------------------------------------------------------
+
+    def test_statement_start_end_match_chunk_bounds(self):
+        """statement_start == min(chunk), statement_end == max(chunk)."""
+        g = DependencyGraph(
+            data={0: [1, 2], 1: [], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        # Two chunks: [0, 1] and [2]
+        chunks = [[0, 1], [2]]
+        result = annotate_chunks(chunks, g)
+        assert result[0].statement_start == 0
+        assert result[0].statement_end == 1
+        assert result[1].statement_start == 2
+        assert result[1].statement_end == 2
+
+    def test_statement_indices_preserved(self):
+        """statement_indices must be the original chunk list contents."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: [], 3: []},
+            control_flow={0: [], 1: [], 2: [], 3: []},
+            num_statements=4,
+        )
+        chunks = [[0, 1], [2, 3]]
+        result = annotate_chunks(chunks, g)
+        assert result[0].statement_indices == [0, 1]
+        assert result[1].statement_indices == [2, 3]
+
+    # ------------------------------------------------------------------
+    # Metadata fields
+    # ------------------------------------------------------------------
+
+    def test_default_metadata_empty(self):
+        """When metadata is omitted, defaults are empty string / None."""
+        g = DependencyGraph(data={0: []}, control_flow={0: []}, num_statements=1)
+        result = annotate_chunks([[0]], g)
+        ci = result[0]
+        assert ci.function_name == ""
+        assert ci.file_path == ""
+        assert ci.function_id is None
+
+    def test_metadata_propagated_to_all_chunks(self):
+        """function_name, file_path, function_id appear on every ChunkInfo."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = [[0], [1], [2]]
+        result = annotate_chunks(
+            chunks, g,
+            function_name="my_func",
+            file_path="/src/module.py",
+            function_id=42,
+        )
+        for ci in result:
+            assert ci.function_name == "my_func"
+            assert ci.file_path == "/src/module.py"
+            assert ci.function_id == 42
+
+    def test_function_id_zero_is_stored(self):
+        """function_id=0 must be stored (falsy but valid)."""
+        g = DependencyGraph(data={0: []}, control_flow={0: []}, num_statements=1)
+        result = annotate_chunks([[0]], g, function_id=0)
+        assert result[0].function_id == 0
+
+    # ------------------------------------------------------------------
+    # Cross-chunk dependency links
+    # ------------------------------------------------------------------
+
+    def test_no_cross_chunk_deps_for_independent_stmts(self):
+        """Completely independent statements → no cross-chunk deps."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = [[0], [1], [2]]
+        result = annotate_chunks(chunks, g)
+        for ci in result:
+            assert ci.depends_on_chunks == []
+            assert ci.depended_on_by_chunks == []
+
+    def test_no_cross_chunk_deps_single_chain_single_chunk(self):
+        """A single-chunk function has no cross-chunk deps by definition."""
+        g = DependencyGraph(
+            data={0: [1], 1: [2], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = [[0, 1, 2]]
+        result = annotate_chunks(chunks, g)
+        assert result[0].depends_on_chunks == []
+        assert result[0].depended_on_by_chunks == []
+
+    def test_cross_chunk_dep_simple(self):
+        """Chunk 1 reads from stmt 0 (chunk 0) → cross-chunk dep 0→1."""
+        # stmt 0 writes something read by stmt 2; chunks: [[0,1],[2]]
+        g = DependencyGraph(
+            data={0: [2], 1: [], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = [[0, 1], [2]]
+        result = annotate_chunks(chunks, g)
+        # Chunk 1 (stmt 2) reads from chunk 0 (stmt 0)
+        assert result[1].depends_on_chunks == [0]
+        assert result[0].depended_on_by_chunks == [1]
+        # Chunk 0 has no external deps; chunk 1 is not depended on
+        assert result[0].depends_on_chunks == []
+        assert result[1].depended_on_by_chunks == []
+
+    def test_cross_chunk_dep_multiple_providers(self):
+        """Chunk 2 reads from both chunk 0 and chunk 1."""
+        # chunks: [[0],[1],[2]]; graph.data[0]=[2], graph.data[1]=[2]
+        g = DependencyGraph(
+            data={0: [2], 1: [2], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = [[0], [1], [2]]
+        result = annotate_chunks(chunks, g)
+        assert sorted(result[2].depends_on_chunks) == [0, 1]
+        assert result[0].depended_on_by_chunks == [2]
+        assert result[1].depended_on_by_chunks == [2]
+
+    def test_cross_chunk_dep_chain(self):
+        """Chunk 0→chunk 1→chunk 2 dep chain."""
+        g = DependencyGraph(
+            data={0: [1], 1: [2], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = [[0], [1], [2]]
+        result = annotate_chunks(chunks, g)
+        assert result[0].depends_on_chunks == []
+        assert result[0].depended_on_by_chunks == [1]
+        assert result[1].depends_on_chunks == [0]
+        assert result[1].depended_on_by_chunks == [2]
+        assert result[2].depends_on_chunks == [1]
+        assert result[2].depended_on_by_chunks == []
+
+    def test_depends_on_chunks_sorted(self):
+        """depends_on_chunks and depended_on_by_chunks are always sorted."""
+        # Chunk 3 reads from chunks 0, 1, 2
+        g = DependencyGraph(
+            data={0: [3], 1: [3], 2: [3], 3: []},
+            control_flow={0: [], 1: [], 2: [], 3: []},
+            num_statements=4,
+        )
+        chunks = [[0], [1], [2], [3]]
+        result = annotate_chunks(chunks, g)
+        assert result[3].depends_on_chunks == [0, 1, 2]
+
+    # ------------------------------------------------------------------
+    # Partition validation
+    # ------------------------------------------------------------------
+
+    def test_valid_partition_does_not_raise(self):
+        """A correctly partitioned chunk list must not raise."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        annotate_chunks([[0], [1], [2]], g)  # should not raise
+
+    def test_invalid_partition_gap_raises(self):
+        """Missing statement index in chunks raises ValueError."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        with pytest.raises(ValueError):
+            annotate_chunks([[0], [2]], g)  # stmt 1 is missing
+
+    def test_invalid_partition_duplicate_raises(self):
+        """Duplicate statement index in chunks raises ValueError."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        with pytest.raises(ValueError):
+            annotate_chunks([[0, 1], [1, 2]], g)  # stmt 1 appears twice
+
+    def test_all_stmts_covered_by_group_then_annotate(self):
+        """group_into_chunks output always forms a valid partition for annotate_chunks."""
+        g = DependencyGraph(
+            data={0: [1], 1: [2], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = group_into_chunks(g)
+        result = annotate_chunks(chunks, g)
+        all_stmts = [s for ci in result for s in ci.statement_indices]
+        assert sorted(all_stmts) == list(range(g.num_statements))
+
+    # ------------------------------------------------------------------
+    # Integration with build_dependency_graph + group_into_chunks
+    # ------------------------------------------------------------------
+
+    def test_integration_two_independent_chains(self):
+        """Two independent chains produce two chunks; no cross-chunk deps."""
+        code = textwrap.dedent("""\
+            def process(x, y):
+                a = x + 1
+                b = a * 2
+                c = y + 1
+                d = c * 2
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        result = annotate_chunks(chunks, g, function_name="process", file_path="mod.py")
+        assert len(result) == 2
+        for ci in result:
+            assert ci.function_name == "process"
+            assert ci.file_path == "mod.py"
+        # Independent chains → no cross-chunk data-flow deps
+        for ci in result:
+            assert ci.depends_on_chunks == []
+            assert ci.depended_on_by_chunks == []
+
+    def test_integration_forced_split_creates_cross_chunk_dep(self):
+        """A forced split on a closed-chunk dependency is reflected in ChunkInfo."""
+        # stmt 3 reads from stmt 0 (in the closed first chunk)
+        g = DependencyGraph(
+            data={0: [1, 3], 1: [], 2: [], 3: []},
+            control_flow={0: [], 1: [], 2: [], 3: []},
+            num_statements=4,
+        )
+        chunks = group_into_chunks(g)
+        result = annotate_chunks(chunks, g)
+        # Locate the chunk containing stmt 3 and chunk containing stmt 0
+        chunk_of = {idx: ci.chunk_index for ci in result for idx in ci.statement_indices}
+        c0 = chunk_of[0]
+        c3 = chunk_of[3]
+        assert c0 != c3
+        assert c0 in result[c3].depends_on_chunks
+        assert c3 in result[c0].depended_on_by_chunks
+
+    def test_integration_full_metadata(self):
+        """Full pipeline: build → chunk → annotate carries all metadata."""
+        code = textwrap.dedent("""\
+            def compute(n):
+                total = 0
+                for i in range(n):
+                    total += i
+                return total
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        result = annotate_chunks(
+            chunks, g,
+            function_name="compute",
+            file_path="/project/math.py",
+            function_id=7,
+        )
+        assert all(ci.function_name == "compute" for ci in result)
+        assert all(ci.file_path == "/project/math.py" for ci in result)
+        assert all(ci.function_id == 7 for ci in result)
+        # chunk_index matches list position
+        for i, ci in enumerate(result):
+            assert ci.chunk_index == i
+        # statement_start ≤ statement_end
+        for ci in result:
+            assert ci.statement_start <= ci.statement_end
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def test_importable_from_package(self):
+        from code_similarity_mcp.parser import annotate_chunks as ac, ChunkInfo as CI
+        assert callable(ac)
+        assert CI is ChunkInfo
+
+    def test_importable_from_base(self):
+        from code_similarity_mcp.parser.base import annotate_chunks as ac, ChunkInfo as CI
+        assert callable(ac)
+        assert CI is ChunkInfo

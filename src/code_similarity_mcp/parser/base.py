@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 
 @dataclass
@@ -140,6 +140,128 @@ def group_into_chunks(
         chunks.append(current_chunk)
 
     return chunks
+
+
+@dataclass
+class ChunkInfo:
+    """Metadata for a single statement chunk within a function.
+
+    Attributes:
+        chunk_index: 0-based position of this chunk in the function's chunk list.
+        statement_start: Lowest statement index contained in this chunk.
+        statement_end: Highest statement index contained in this chunk.
+        statement_indices: Ordered list of all statement indices in this chunk.
+        function_name: Name of the parent function/method (empty string if unknown).
+        file_path: Source file path of the parent function (empty string if unknown).
+        function_id: Optional registry/database id of the parent function.
+        depends_on_chunks: Sorted list of chunk indices this chunk reads from
+            (i.e. chunk M appears here when a variable written in chunk M is
+            read by a statement in this chunk).
+        depended_on_by_chunks: Sorted list of chunk indices that read from this
+            chunk (inverse of ``depends_on_chunks``).
+    """
+
+    chunk_index: int
+    statement_start: int
+    statement_end: int
+    statement_indices: list
+    function_name: str
+    file_path: str
+    function_id: Optional[int]
+    depends_on_chunks: list
+    depended_on_by_chunks: list
+
+
+def annotate_chunks(
+    chunks: list,
+    graph: "DependencyGraph",
+    function_name: str = "",
+    file_path: str = "",
+    function_id: Optional[int] = None,
+) -> list:
+    """Annotate a list of statement-index chunks with rich metadata.
+
+    Takes the raw chunk partition produced by :func:`group_into_chunks` and
+    returns a :class:`ChunkInfo` for every chunk, enriched with:
+
+    * The statement-index range (``statement_start`` / ``statement_end``).
+    * Parent function metadata (``function_name``, ``file_path``,
+      ``function_id``).
+    * Cross-chunk dependency links derived from *data-flow* edges in *graph*:
+      ``depends_on_chunks`` lists every other chunk that writes a variable read
+      by this chunk; ``depended_on_by_chunks`` is the symmetric inverse.
+
+    Cross-chunk control-flow edges are **not** included — only data-flow edges
+    from ``graph.data`` are used when computing dependency links.
+
+    Args:
+        chunks: A list of chunks as returned by :func:`group_into_chunks`.
+            Each chunk is a non-empty list of consecutive statement indices.
+        graph: The :class:`DependencyGraph` for the same function.
+        function_name: Human-readable name of the parent function/method.
+        file_path: Source file from which the function was extracted.
+        function_id: Optional registry id (e.g. SQLite row id) of the function.
+
+    Returns:
+        A :class:`list` of :class:`ChunkInfo` objects in the same order as
+        *chunks*.  Returns an empty list when *chunks* is empty.
+
+    Raises:
+        ValueError: If the chunks do not form a valid partition of
+            ``range(graph.num_statements)`` (gaps or overlaps detected).
+    """
+    if not chunks:
+        return []
+
+    # Validate: chunks must cover range(num_statements) exactly once.
+    all_indices = [idx for chunk in chunks for idx in chunk]
+    if sorted(all_indices) != list(range(graph.num_statements)):
+        raise ValueError(
+            f"chunks do not partition range({graph.num_statements}): "
+            f"got indices {sorted(all_indices)}"
+        )
+
+    # Build statement → chunk_index lookup.
+    stmt_to_chunk: dict = {}
+    for chunk_idx, chunk in enumerate(chunks):
+        for stmt_idx in chunk:
+            stmt_to_chunk[stmt_idx] = chunk_idx
+
+    # Build reverse data-flow index: providers[i] = {j : i in graph.data[j]}
+    providers: dict = {i: set() for i in range(graph.num_statements)}
+    for j, consumers in graph.data.items():
+        for i in consumers:
+            providers[i].add(j)
+
+    # Compute cross-chunk dependency sets.
+    n = len(chunks)
+    depends_on: list = [set() for _ in range(n)]      # depends_on[N] = {M, ...}
+    depended_on_by: list = [set() for _ in range(n)]  # depended_on_by[M] = {N, ...}
+
+    for chunk_idx, chunk in enumerate(chunks):
+        for stmt_idx in chunk:
+            for provider_stmt in providers[stmt_idx]:
+                provider_chunk = stmt_to_chunk[provider_stmt]
+                if provider_chunk != chunk_idx:
+                    depends_on[chunk_idx].add(provider_chunk)
+                    depended_on_by[provider_chunk].add(chunk_idx)
+
+    # Build ChunkInfo list.
+    result: list = []
+    for chunk_idx, chunk in enumerate(chunks):
+        result.append(ChunkInfo(
+            chunk_index=chunk_idx,
+            statement_start=min(chunk),
+            statement_end=max(chunk),
+            statement_indices=list(chunk),
+            function_name=function_name,
+            file_path=file_path,
+            function_id=function_id,
+            depends_on_chunks=sorted(depends_on[chunk_idx]),
+            depended_on_by_chunks=sorted(depended_on_by[chunk_idx]),
+        ))
+
+    return result
 
 
 class BaseParser(ABC):
