@@ -12,7 +12,12 @@ from mcp.server.fastmcp import FastMCP
 from code_similarity_mcp.embeddings.generator import EmbeddingGenerator
 from code_similarity_mcp.index.registry import MethodRegistry
 from code_similarity_mcp.normalizer import normalize_code
-from code_similarity_mcp.parser.python import count_statements
+from code_similarity_mcp.parser.base import annotate_chunks, embed_chunks, group_into_chunks
+from code_similarity_mcp.parser.python import (
+    build_dependency_graph,
+    count_statements,
+    get_flat_statements,
+)
 from code_similarity_mcp.parser.registry import SUPPORTED_EXTENSIONS, get_parser
 from code_similarity_mcp.similarity.filter import FilterPipeline
 from code_similarity_mcp.similarity.scorer import SimilarityScorer
@@ -377,6 +382,118 @@ def find_large_functions(
     log.info("find_large_functions done: %d/%d methods exceed %d statements",
              len(large), len(all_methods), min_statements)
     return json.dumps({"large_functions": large}, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Tool: chunk_repository
+# ---------------------------------------------------------------------------
+
+_CHUNK_MIN_STATEMENTS = 30  # functions with more than this many statements are chunked
+
+
+@app.tool()
+def chunk_repository(
+    repository_root: str,
+    index_dir: str | None = None,
+    max_statements_per_chunk: int = 10,
+) -> str:
+    """
+    Run the full chunking pipeline on large functions in a repository.
+
+    Scans all indexed functions from files under repository_root, identifies
+    those with more than 30 statements, and runs the dependency-graph chunking
+    pipeline on each.  Chunk metadata and embeddings are stored in the index
+    for later retrieval and similarity search.
+
+    Args:
+        repository_root: Root directory of the repository used to filter
+            which indexed functions to process.
+        index_dir: Index directory (default: ~/.code-similarity-mcp/index).
+        max_statements_per_chunk: Hard cap on the number of statements per
+            chunk (default: 10).
+
+    Returns:
+        JSON summary: { files_scanned, functions_chunked, chunks_created }
+    """
+    log.info(
+        "chunk_repository called: root=%s index_dir=%s max_stmts=%d",
+        repository_root,
+        index_dir,
+        max_statements_per_chunk,
+    )
+
+    root = Path(repository_root)
+    if not root.is_dir():
+        log.error("Not a directory: %s", repository_root)
+        return json.dumps({"error": f"Not a directory: {repository_root}"})
+
+    registry = _get_registry(index_dir)
+    all_methods = registry.get_all_methods()
+
+    # Filter to methods from files within repository_root.
+    repo_methods = [
+        m for m in all_methods
+        if Path(m["file_path"]).is_relative_to(root)
+    ]
+
+    files_scanned = len({m["file_path"] for m in repo_methods})
+    functions_chunked = 0
+    chunks_created = 0
+
+    for method in repo_methods:
+        if count_statements(method["body_code"]) <= _CHUNK_MIN_STATEMENTS:
+            continue
+
+        try:
+            graph = build_dependency_graph(method["body_code"])
+            if graph.num_statements == 0:
+                continue
+
+            raw_chunks = group_into_chunks(graph, max_statements_per_chunk)
+            if not raw_chunks:
+                continue
+
+            statements = get_flat_statements(method["body_code"])
+            annotated = annotate_chunks(
+                raw_chunks,
+                graph,
+                function_name=method["name"],
+                file_path=method["file_path"],
+                function_id=method["id"],
+            )
+            embeddings = embed_chunks(
+                annotated, method["body_code"], statements, _generator
+            )
+
+            # Replace any previously stored chunks for this function.
+            registry.delete_chunks_by_function(method["id"])
+            for chunk_info, emb in zip(annotated, embeddings):
+                registry.add_chunk(chunk_info, emb)
+                chunks_created += 1
+
+            functions_chunked += 1
+            log.debug(
+                "Chunked %s (%s): %d chunks",
+                method["name"],
+                method["file_path"],
+                len(annotated),
+            )
+        except Exception:
+            log.warning(
+                "Failed to chunk %s in %s:\n%s",
+                method["name"],
+                method["file_path"],
+                traceback.format_exc(),
+            )
+
+    registry.close()
+    result = {
+        "files_scanned": files_scanned,
+        "functions_chunked": functions_chunked,
+        "chunks_created": chunks_created,
+    }
+    log.info("chunk_repository done: %s", result)
+    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------

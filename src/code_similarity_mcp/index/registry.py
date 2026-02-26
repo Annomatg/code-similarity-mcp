@@ -21,10 +21,14 @@ class MethodRegistry:
         self._db_path = self._dir / "methods.db"
         self._faiss_path = self._dir / "index.faiss"
         self._id_map_path = self._dir / "id_map.json"
+        self._chunks_faiss_path = self._dir / "chunks.faiss"
+        self._chunk_id_map_path = self._dir / "chunk_id_map.json"
 
         self._conn = sqlite3.connect(str(self._db_path))
         self._init_db()
+        self._init_chunks_table()
         self._faiss_index, self._id_map = self._load_or_create_index()
+        self._chunks_index, self._chunk_id_map = self._load_or_create_chunk_index()
 
     # ------------------------------------------------------------------
     # DB setup
@@ -266,3 +270,123 @@ class MethodRegistry:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ------------------------------------------------------------------
+    # Chunk storage — SQLite table + dedicated FAISS index
+    # ------------------------------------------------------------------
+
+    def _init_chunks_table(self) -> None:
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                function_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                statement_start INTEGER NOT NULL,
+                statement_end INTEGER NOT NULL,
+                statement_indices TEXT NOT NULL,
+                function_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                depends_on_chunks TEXT NOT NULL,
+                depended_on_by_chunks TEXT NOT NULL,
+                faiss_pos INTEGER
+            )
+        """)
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_function ON chunks(function_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path)"
+        )
+        self._conn.commit()
+
+    def _load_or_create_chunk_index(self):
+        if self._chunks_faiss_path.exists() and self._chunk_id_map_path.exists():
+            index = faiss.read_index(str(self._chunks_faiss_path))
+            id_map: dict[int, int] = {
+                int(k): v
+                for k, v in json.loads(self._chunk_id_map_path.read_text()).items()
+            }
+        else:
+            index = faiss.IndexFlatIP(EMBEDDING_DIM)
+            id_map = {}
+        return index, id_map
+
+    def _save_chunk_index(self) -> None:
+        faiss.write_index(self._chunks_index, str(self._chunks_faiss_path))
+        self._chunk_id_map_path.write_text(json.dumps(self._chunk_id_map))
+
+    def add_chunk(self, chunk_info, embedding: np.ndarray) -> int:
+        """Insert a chunk and its embedding. Returns the chunk DB row id."""
+        cur = self._conn.execute(
+            """INSERT INTO chunks
+               (function_id, chunk_index, statement_start, statement_end,
+                statement_indices, function_name, file_path,
+                depends_on_chunks, depended_on_by_chunks, faiss_pos)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                chunk_info.function_id,
+                chunk_info.chunk_index,
+                chunk_info.statement_start,
+                chunk_info.statement_end,
+                json.dumps(chunk_info.statement_indices),
+                chunk_info.function_name,
+                chunk_info.file_path,
+                json.dumps(chunk_info.depends_on_chunks),
+                json.dumps(chunk_info.depended_on_by_chunks),
+                None,  # faiss_pos set below
+            ),
+        )
+        chunk_db_id = cur.lastrowid
+
+        vec = embedding.reshape(1, -1).astype(np.float32)
+        faiss_pos = self._chunks_index.ntotal
+        self._chunks_index.add(vec)
+        self._chunk_id_map[faiss_pos] = chunk_db_id
+
+        self._conn.execute(
+            "UPDATE chunks SET faiss_pos=? WHERE id=?", (faiss_pos, chunk_db_id)
+        )
+        self._conn.commit()
+        self._save_chunk_index()
+        return chunk_db_id
+
+    def delete_chunks_by_function(self, function_id: int) -> int:
+        """Remove all chunks for a function. Returns count removed."""
+        cur = self._conn.execute(
+            "SELECT id, faiss_pos FROM chunks WHERE function_id=?", (function_id,)
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return 0
+
+        self._conn.execute("DELETE FROM chunks WHERE function_id=?", (function_id,))
+        self._conn.commit()
+
+        positions = {row[1] for row in rows if row[1] is not None}
+        for pos in positions:
+            self._chunk_id_map.pop(pos, None)
+        self._save_chunk_index()
+        return len(rows)
+
+    def get_chunks_by_function(self, function_id: int) -> list[dict]:
+        """Return all stored chunks for a function."""
+        cur = self._conn.execute(
+            "SELECT * FROM chunks WHERE function_id=?", (function_id,)
+        )
+        return [self._chunk_row_to_dict(r) for r in cur.fetchall()]
+
+    def _chunk_row_to_dict(self, row) -> dict:
+        cols = [
+            d[0]
+            for d in self._conn.execute("SELECT * FROM chunks LIMIT 0").description
+        ]
+        d = dict(zip(cols, row))
+        d["statement_indices"] = json.loads(d["statement_indices"])
+        d["depends_on_chunks"] = json.loads(d["depends_on_chunks"])
+        d["depended_on_by_chunks"] = json.loads(d["depended_on_by_chunks"])
+        return d
+
+    def get_chunk_count(self) -> int:
+        """Return total number of stored chunks."""
+        cur = self._conn.execute("SELECT COUNT(*) FROM chunks")
+        return cur.fetchone()[0]
