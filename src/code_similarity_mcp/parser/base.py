@@ -264,6 +264,71 @@ def annotate_chunks(
     return result
 
 
+def embed_chunks(
+    chunks: list,
+    function_source: str,
+    statements: list,
+    generator,
+    language: str = "python",
+) -> list:
+    """Generate a normalized embedding for each chunk.
+
+    For each :class:`ChunkInfo` in *chunks*:
+
+    1. Extracts the source lines covered by the chunk using the ``start_line``
+       and ``end_line`` fields of the corresponding :class:`StatementInfo`
+       entries in *statements*.
+    2. Wraps the extracted lines in a minimal dummy function so the language
+       normalizer can rename local identifiers consistently.
+    3. Normalizes the wrapped source with the registered normalizer for
+       *language*.
+    4. Encodes the normalized text using *generator*.
+
+    Args:
+        chunks: Annotated chunks from :func:`annotate_chunks`.
+        function_source: Full source text of the function from which the chunks
+            were derived (the same string passed to ``build_dependency_graph``).
+        statements: Flat statement list for the same function, as returned by
+            :func:`~code_similarity_mcp.parser.python.get_flat_statements`.
+            Must be indexed consistently with ``chunk.statement_indices``.
+        generator: An :class:`~code_similarity_mcp.embeddings.generator.EmbeddingGenerator`
+            instance used to produce the 384-dimensional embeddings.
+        language: Source language used to select the normalizer (default
+            ``"python"``).
+
+    Returns:
+        A :class:`list` of ``numpy.ndarray`` embeddings, one per chunk, in the
+        same order as *chunks*.  Each array has shape ``(384,)`` and dtype
+        ``float32``.  Returns an empty list when *chunks* is empty.
+    """
+    if not chunks:
+        return []
+
+    from code_similarity_mcp.normalizer.registry import get_normalizer
+
+    normalizer = get_normalizer(language)
+    source_lines = function_source.splitlines()
+    texts: list = []
+
+    for chunk in chunks:
+        # Compute the 1-based line range spanned by this chunk's statements.
+        stmt_infos = [statements[idx] for idx in chunk.statement_indices]
+        start_line = min(s.start_line for s in stmt_infos)
+        end_line = max(s.end_line for s in stmt_infos)
+
+        # Slice the function source (1-based → 0-based indexing).
+        chunk_source = "\n".join(source_lines[start_line - 1 : end_line])
+
+        # Wrap in a dummy function so the normalizer can rename local variables.
+        indented = "\n".join("    " + line for line in chunk_source.splitlines())
+        wrapped = "def _chunk_func():\n" + indented
+
+        texts.append(normalizer.normalize(wrapped))
+
+    import numpy as np  # noqa: F401 — ensure numpy is available for callers
+    return list(generator.encode(texts))
+
+
 class BaseParser(ABC):
     """Abstract parser for a specific language."""
 

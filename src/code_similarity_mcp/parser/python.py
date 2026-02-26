@@ -580,6 +580,60 @@ def _flatten_alt(alt_node, source: bytes, result: list, parent_idx) -> None:
             return
 
 
+def get_flat_statements(code: str) -> list[StatementInfo]:
+    """Return the fully-flattened list of statements for the first function in *code*.
+
+    Unlike :func:`get_top_level_statements`, which only returns direct children of
+    the function body block, this function **recursively expands** every compound
+    statement (``if``, ``for``, ``while``, ``with``, ``try``, ``match``) so that
+    each nested statement receives its own zero-based index — matching the flat
+    indexing used by :func:`build_dependency_graph`.
+
+    Args:
+        code: Source text of a Python function (or a module containing one).
+
+    Returns:
+        A list of :class:`StatementInfo` named-tuples, one per flat statement in
+        the function body, in source order.  The ``index`` field is the zero-based
+        position in the flat list (consistent with
+        :attr:`~code_similarity_mcp.parser.base.DependencyGraph.num_statements`).
+        Returns an empty list if no function definition is found.
+    """
+    source = code.encode("utf-8")
+    parser = Parser(_PY_LANGUAGE)
+    tree = parser.parse(source)
+
+    func_node = None
+    for node in _walk(tree.root_node):
+        if node.type == "function_definition":
+            func_node = node
+            break
+
+    if func_node is None:
+        return []
+
+    block_node = None
+    for child in func_node.children:
+        if child.type == "block":
+            block_node = child
+            break
+
+    if block_node is None:
+        return []
+
+    flat = _flatten_stmts(block_node, source)
+    result: list[StatementInfo] = []
+    for i, (node, _) in enumerate(flat):
+        result.append(StatementInfo(
+            index=i,
+            node_type=node.type,
+            start_line=node.start_point[0] + 1,   # 1-based
+            end_line=node.end_point[0] + 1,
+            source_text=_node_text(node, source),
+        ))
+    return result
+
+
 def build_dependency_graph(code: str) -> DependencyGraph:
     """Build a dependency graph for the first function in *code*.
 
