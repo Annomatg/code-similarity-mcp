@@ -66,7 +66,10 @@ class DependencyGraph:
     num_statements: int
 
 
-def group_into_chunks(graph: "DependencyGraph") -> list[list[int]]:
+def group_into_chunks(
+    graph: "DependencyGraph",
+    max_statements_per_chunk: int = 10,
+) -> list[list[int]]:
     """Group statements into self-consistent chunks using a greedy heuristic.
 
     Processes statements in order.  A new chunk begins whenever:
@@ -77,7 +80,9 @@ def group_into_chunks(graph: "DependencyGraph") -> list[list[int]]:
        current chunk is already non-empty; or
     2. The next statement reads a variable written by a statement in an
        already-closed chunk (an *unresolved* cross-chunk dependency that cannot
-       be fixed by further extension).
+       be fixed by further extension); or
+    3. The current chunk has reached *max_statements_per_chunk* statements
+       (hard size cap — the chunk is closed regardless of dependency state).
 
     A chunk is *self-consistent* when every variable read by statements inside
     the chunk is either written by an earlier statement in the same chunk or
@@ -86,6 +91,10 @@ def group_into_chunks(graph: "DependencyGraph") -> list[list[int]]:
     Args:
         graph: A :class:`DependencyGraph` built by
             :func:`~code_similarity_mcp.parser.python.build_dependency_graph`.
+        max_statements_per_chunk: Maximum number of statements allowed in a
+            single chunk.  When the current chunk reaches this size the chunk
+            is closed and a new one is started, regardless of dependency state.
+            Must be a positive integer.  Defaults to ``10``.
 
     Returns:
         A list of chunks.  Each chunk is a non-empty list of consecutive
@@ -117,7 +126,10 @@ def group_into_chunks(graph: "DependencyGraph") -> list[list[int]]:
         # goes into the first chunk regardless).
         is_fresh_start = len(providers[i]) == 0
 
-        if has_closed_dep or (is_fresh_start and len(current_chunk) > 0):
+        # Rule 3: current chunk has reached the size cap.
+        max_size_reached = len(current_chunk) >= max_statements_per_chunk
+
+        if has_closed_dep or (is_fresh_start and len(current_chunk) > 0) or max_size_reached:
             chunks.append(current_chunk)
             closed_statements.update(current_chunk)
             current_chunk = [i]

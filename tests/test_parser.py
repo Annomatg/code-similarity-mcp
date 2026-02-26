@@ -1703,3 +1703,102 @@ class TestGroupIntoChunks:
     def test_importable_from_base(self):
         from code_similarity_mcp.parser.base import group_into_chunks as gic
         assert callable(gic)
+
+    # ------------------------------------------------------------------
+    # max_statements_per_chunk (feature #22)
+    # ------------------------------------------------------------------
+
+    def test_default_max_is_ten(self):
+        """A chain of exactly 10 statements stays in one chunk by default."""
+        # 10-statement chain: 0→1→2→…→9
+        data = {i: [i + 1] for i in range(9)}
+        data[9] = []
+        g = DependencyGraph(data=data, control_flow={i: [] for i in range(10)},
+                            num_statements=10)
+        chunks = group_into_chunks(g)
+        assert chunks == [list(range(10))]
+
+    def test_default_max_splits_eleven_statement_chain(self):
+        """A chain of 11 interdependent statements must be split (default max=10)."""
+        data = {i: [i + 1] for i in range(10)}
+        data[10] = []
+        g = DependencyGraph(data=data, control_flow={i: [] for i in range(11)},
+                            num_statements=11)
+        chunks = group_into_chunks(g)
+        assert all(len(c) <= 10 for c in chunks)
+        # Verify full partition
+        all_stmts = [s for c in chunks for s in c]
+        assert sorted(all_stmts) == list(range(11))
+
+    def test_no_chunk_exceeds_max(self):
+        """No output chunk ever exceeds max_statements_per_chunk."""
+        # Long chain of 20 statements, all interdependent
+        data = {i: [i + 1] for i in range(19)}
+        data[19] = []
+        g = DependencyGraph(data=data, control_flow={i: [] for i in range(20)},
+                            num_statements=20)
+        for max_size in [1, 2, 3, 5, 7, 10, 15, 20]:
+            chunks = group_into_chunks(g, max_statements_per_chunk=max_size)
+            assert all(len(c) <= max_size for c in chunks), (
+                f"max_size={max_size}: chunk sizes {[len(c) for c in chunks]}"
+            )
+
+    def test_max_one_each_stmt_own_chunk(self):
+        """max_statements_per_chunk=1 forces every statement into its own chunk."""
+        data = {0: [1], 1: [2], 2: []}
+        g = DependencyGraph(data=data, control_flow={0: [], 1: [], 2: []},
+                            num_statements=3)
+        chunks = group_into_chunks(g, max_statements_per_chunk=1)
+        assert chunks == [[0], [1], [2]]
+
+    def test_max_two_splits_three_stmt_chain(self):
+        """Chain of 3 with max=2 → [[0,1],[2]]."""
+        data = {0: [1], 1: [2], 2: []}
+        g = DependencyGraph(data=data, control_flow={0: [], 1: [], 2: []},
+                            num_statements=3)
+        chunks = group_into_chunks(g, max_statements_per_chunk=2)
+        assert chunks == [[0, 1], [2]]
+
+    def test_max_larger_than_stmts_no_effect(self):
+        """max bigger than total statements → behaves as if no cap."""
+        data = {0: [1], 1: [2], 2: []}
+        g = DependencyGraph(data=data, control_flow={0: [], 1: [], 2: []},
+                            num_statements=3)
+        chunks_uncapped = group_into_chunks(g, max_statements_per_chunk=100)
+        chunks_default = group_into_chunks(g)
+        assert chunks_uncapped == chunks_default
+
+    def test_max_partition_is_complete(self):
+        """With custom max, chunks still form a complete partition."""
+        data = {i: [i + 1] for i in range(14)}
+        data[14] = []
+        g = DependencyGraph(data=data, control_flow={i: [] for i in range(15)},
+                            num_statements=15)
+        chunks = group_into_chunks(g, max_statements_per_chunk=4)
+        all_stmts = [s for c in chunks for s in c]
+        assert sorted(all_stmts) == list(range(15))
+
+    def test_max_with_real_code(self):
+        """Real Python function: max=2 forces split inside dependent chain."""
+        code = textwrap.dedent("""\
+            def f(x):
+                a = x + 1
+                b = a * 2
+                c = b - 1
+                d = c + 5
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g, max_statements_per_chunk=2)
+        assert all(len(c) <= 2 for c in chunks)
+        all_stmts = [s for c in chunks for s in c]
+        assert sorted(all_stmts) == list(range(g.num_statements))
+
+    def test_max_empty_graph_still_empty(self):
+        """max_statements_per_chunk has no effect on an empty graph."""
+        g = DependencyGraph(data={}, control_flow={}, num_statements=0)
+        assert group_into_chunks(g, max_statements_per_chunk=1) == []
+
+    def test_max_single_stmt_still_one_chunk(self):
+        """A single statement always fits in one chunk regardless of max."""
+        g = DependencyGraph(data={0: []}, control_flow={0: []}, num_statements=1)
+        assert group_into_chunks(g, max_statements_per_chunk=1) == [[0]]
