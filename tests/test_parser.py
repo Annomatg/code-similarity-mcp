@@ -5,7 +5,9 @@ import hashlib
 
 import pytest
 
-from code_similarity_mcp.parser.python import PythonParser, count_statements, get_top_level_statements
+from code_similarity_mcp.parser.python import (
+    PythonParser, count_statements, get_top_level_statements, build_dependency_graph,
+)
 from code_similarity_mcp.parser.base import MethodInfo, StatementInfo
 from code_similarity_mcp.parser.registry import get_parser, SUPPORTED_EXTENSIONS
 
@@ -853,3 +855,290 @@ class TestGetTopLevelStatements:
         from code_similarity_mcp.parser import get_top_level_statements as gts, StatementInfo as SI
         assert callable(gts)
         assert SI is StatementInfo
+
+
+# ---------------------------------------------------------------------------
+# build_dependency_graph
+# ---------------------------------------------------------------------------
+
+class TestBuildDependencyGraph:
+    # ------------------------------------------------------------------
+    # Basic structure and edge cases
+    # ------------------------------------------------------------------
+
+    def test_no_function_returns_empty_dict(self):
+        assert build_dependency_graph("x = 1\n") == {}
+
+    def test_empty_string_returns_empty_dict(self):
+        assert build_dependency_graph("") == {}
+
+    def test_all_statement_indices_are_keys(self):
+        code = textwrap.dedent("""\
+            def f():
+                a = 1
+                b = 2
+                c = 3
+        """)
+        g = build_dependency_graph(code)
+        assert sorted(g.keys()) == [0, 1, 2]
+
+    def test_single_pass_statement_no_edges(self):
+        code = "def f():\n    pass\n"
+        g = build_dependency_graph(code)
+        assert g == {0: []}
+
+    # ------------------------------------------------------------------
+    # Simple sequential assignments
+    # ------------------------------------------------------------------
+
+    def test_simple_dependency(self):
+        code = textwrap.dedent("""\
+            def f():
+                x = 1
+                y = x + 1
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]
+
+    def test_no_dependency_when_vars_independent(self):
+        code = textwrap.dedent("""\
+            def f():
+                x = 1
+                y = 2
+        """)
+        g = build_dependency_graph(code)
+        assert g[0] == []
+        assert g[1] == []
+
+    def test_return_reads_variable(self):
+        code = textwrap.dedent("""\
+            def f():
+                result = compute()
+                return result
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]
+
+    # ------------------------------------------------------------------
+    # Multiple consumers and fanout
+    # ------------------------------------------------------------------
+
+    def test_multiple_consumers(self):
+        code = textwrap.dedent("""\
+            def f():
+                x = compute()
+                y = x + 1
+                z = x + 2
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]
+        assert 2 in g[0]
+
+    def test_multiple_producers_one_consumer(self):
+        code = textwrap.dedent("""\
+            def f():
+                a = 1
+                b = 2
+                c = a + b
+        """)
+        g = build_dependency_graph(code)
+        assert 2 in g[0]
+        assert 2 in g[1]
+
+    # ------------------------------------------------------------------
+    # Transitive / chain dependencies
+    # ------------------------------------------------------------------
+
+    def test_chain_no_skip_edges(self):
+        """a → b → c: a consumed by b, b consumed by c, NOT a directly by c."""
+        code = textwrap.dedent("""\
+            def f():
+                a = source()
+                b = transform(a)
+                c = finalize(b)
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]   # a → b
+        assert 2 in g[1]   # b → c
+        assert 2 not in g[0]  # no direct a → c edge
+
+    def test_transitive_path_exists(self):
+        """Transitive dependency is reachable via the graph."""
+        code = textwrap.dedent("""\
+            def f():
+                a = 1
+                b = a + 1
+                c = b + 1
+                d = c + 1
+        """)
+        g = build_dependency_graph(code)
+        # Chain: 0→1→2→3
+        assert 1 in g[0]
+        assert 2 in g[1]
+        assert 3 in g[2]
+        # No skip edges
+        assert 2 not in g[0]
+        assert 3 not in g[0]
+        assert 3 not in g[1]
+
+    # ------------------------------------------------------------------
+    # Augmented assignment (reads AND writes same variable)
+    # ------------------------------------------------------------------
+
+    def test_augmented_assignment_creates_edges(self):
+        code = textwrap.dedent("""\
+            def f():
+                total = 0
+                total += 1
+                return total
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]  # total written at 0, read by augmented at 1
+        assert 2 in g[1]  # total written by augmented at 1, read at 2
+
+    # ------------------------------------------------------------------
+    # For loop
+    # ------------------------------------------------------------------
+
+    def test_for_loop_writes_loop_var(self):
+        code = textwrap.dedent("""\
+            def f(items):
+                for item in items:
+                    pass
+                last = item
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]  # item written by for (0), read by assignment (1)
+
+    def test_for_loop_body_writes_tracked(self):
+        """Variables assigned inside the for body are tracked as writes of the for stmt."""
+        code = textwrap.dedent("""\
+            def f(items):
+                total = 0
+                for x in items:
+                    total += x
+                return total
+        """)
+        g = build_dependency_graph(code)
+        # total written at 0, read inside for body at 1
+        assert 1 in g[0]
+        # total also written by for body at 1, read by return at 2
+        assert 2 in g[1]
+
+    # ------------------------------------------------------------------
+    # If statement
+    # ------------------------------------------------------------------
+
+    def test_if_body_writes_propagate(self):
+        code = textwrap.dedent("""\
+            def f(cond):
+                if cond:
+                    result = 1
+                return result
+        """)
+        g = build_dependency_graph(code)
+        # result written inside if body (stmt 0), read by return (stmt 1)
+        assert 1 in g[0]
+
+    def test_if_condition_reads_variable(self):
+        code = textwrap.dedent("""\
+            def f():
+                x = compute()
+                if x > 0:
+                    pass
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]  # x written at 0, read in if condition at 1
+
+    def test_elif_else_writes_tracked(self):
+        code = textwrap.dedent("""\
+            def f(cond):
+                if cond:
+                    v = 1
+                else:
+                    v = 2
+                return v
+        """)
+        g = build_dependency_graph(code)
+        # v written in if/else (stmt 0), read by return (stmt 1)
+        assert 1 in g[0]
+
+    # ------------------------------------------------------------------
+    # While loop
+    # ------------------------------------------------------------------
+
+    def test_while_loop_condition_and_body(self):
+        code = textwrap.dedent("""\
+            def f():
+                n = 10
+                while n > 0:
+                    n -= 1
+                return n
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]  # n written at 0, read in while condition at 1
+        assert 2 in g[1]  # n written in while body at 1, read at return 2
+
+    # ------------------------------------------------------------------
+    # Import statements
+    # ------------------------------------------------------------------
+
+    def test_import_writes_name(self):
+        code = textwrap.dedent("""\
+            def f():
+                import re
+                result = re.match(r'\\d+', text)
+                return result
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]  # re written by import (0), read at stmt 1
+        assert 2 in g[1]  # result written at 1, read at return 2
+
+    def test_from_import_writes_name(self):
+        code = textwrap.dedent("""\
+            def f():
+                from os import path
+                full = path.join("a", "b")
+                return full
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]  # path written by import (0), read at stmt 1
+        assert 2 in g[1]
+
+    # ------------------------------------------------------------------
+    # Try/except
+    # ------------------------------------------------------------------
+
+    def test_try_body_writes_tracked(self):
+        code = textwrap.dedent("""\
+            def f():
+                try:
+                    result = compute()
+                except Exception:
+                    result = None
+                return result
+        """)
+        g = build_dependency_graph(code)
+        # result written in try/except body (stmt 0), read by return (stmt 1)
+        assert 1 in g[0]
+
+    # ------------------------------------------------------------------
+    # Tuple unpacking
+    # ------------------------------------------------------------------
+
+    def test_tuple_unpack_writes_both(self):
+        code = textwrap.dedent("""\
+            def f():
+                a, b = get_pair()
+                c = a + b
+        """)
+        g = build_dependency_graph(code)
+        assert 1 in g[0]  # a and b written at 0, both read at 1
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def test_importable_from_package(self):
+        from code_similarity_mcp.parser import build_dependency_graph as bdg
+        assert callable(bdg)
