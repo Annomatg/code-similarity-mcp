@@ -258,16 +258,17 @@ def test_statement_indices_partition_all_statements(tmp_path):
 
 
 def test_running_twice_does_not_duplicate_chunks(tmp_path):
-    """Calling chunk_repository twice should replace old chunks, not double them."""
+    """Calling chunk_repository twice should not create duplicate chunks."""
     repo, index_dir = _setup_index(tmp_path, _make_large_function(n_stmts=35))
 
     data1 = json.loads(chunk_repository(repo, index_dir=index_dir))
     data2 = json.loads(chunk_repository(repo, index_dir=index_dir))
 
-    # The chunk counts should be equal across both runs
-    assert data1["chunks_created"] == data2["chunks_created"]
+    # Second run should skip unchanged functions — nothing new created
+    assert data2["chunks_created"] == 0
+    assert data2["functions_chunked"] == 0
 
-    # The registry should contain the same number of chunks after the second run
+    # The stored count must equal what the first run created (no duplicates)
     registry = MethodRegistry(index_dir)
     methods = registry.get_all_methods()
     big = next(m for m in methods if m["name"] == "big_func")
@@ -275,6 +276,22 @@ def test_running_twice_does_not_duplicate_chunks(tmp_path):
     registry.close()
 
     assert stored_count == data1["chunks_created"]
+
+
+def test_second_run_unchanged_skips_all_functions(tmp_path):
+    """Second run on an unchanged repo reports zero functions_chunked."""
+    content = (
+        _make_large_function("alpha", n_stmts=35)
+        + "\n\n"
+        + _make_large_function("beta", n_stmts=40)
+    )
+    repo, index_dir = _setup_index(tmp_path, content)
+
+    chunk_repository(repo, index_dir=index_dir)
+    data2 = json.loads(chunk_repository(repo, index_dir=index_dir))
+
+    assert data2["functions_chunked"] == 0
+    assert data2["chunks_created"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +306,9 @@ def test_smaller_max_stmts_produces_more_chunks(tmp_path):
     data_large = json.loads(
         chunk_repository(repo, index_dir=index_dir, max_statements_per_chunk=20)
     )
+    # force_rechunk=True so the second call replaces existing chunks
     data_small = json.loads(
-        chunk_repository(repo, index_dir=index_dir, max_statements_per_chunk=5)
+        chunk_repository(repo, index_dir=index_dir, max_statements_per_chunk=5, force_rechunk=True)
     )
 
     assert data_small["chunks_created"] >= data_large["chunks_created"]
@@ -401,3 +419,127 @@ def test_get_chunk_count_matches_chunks_created(tmp_path):
     registry = MethodRegistry(index_dir)
     assert registry.get_chunk_count() == data["chunks_created"]
     registry.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: re-chunking after file change (feature #28)
+# ---------------------------------------------------------------------------
+
+
+def test_force_rechunk_replaces_existing_chunks(tmp_path):
+    """force_rechunk=True must replace existing chunks, not accumulate them."""
+    repo, index_dir = _setup_index(tmp_path, _make_large_function(n_stmts=35))
+
+    data1 = json.loads(chunk_repository(repo, index_dir=index_dir))
+    data2 = json.loads(chunk_repository(repo, index_dir=index_dir, force_rechunk=True))
+
+    # Both runs should have created the same number of chunks
+    assert data2["chunks_created"] == data1["chunks_created"]
+    assert data2["functions_chunked"] == 1
+
+    # Stored count must equal one run's worth (no accumulation)
+    registry = MethodRegistry(index_dir)
+    methods = registry.get_all_methods()
+    big = next(m for m in methods if m["name"] == "big_func")
+    stored_count = len(registry.get_chunks_by_function(big["id"]))
+    registry.close()
+
+    assert stored_count == data1["chunks_created"]
+
+
+def test_reindexed_function_gets_rechunked(tmp_path):
+    """After a file is re-indexed, chunk_repository must rechunk the updated function."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "module.py"
+    index_dir = str(tmp_path / "index")
+
+    # Initial indexing and chunking
+    src.write_text(_make_large_function("evolving_func", n_stmts=35), encoding="utf-8")
+    index_repository(str(repo), index_dir=index_dir)
+    data1 = json.loads(chunk_repository(str(repo), index_dir=index_dir))
+    assert data1["functions_chunked"] == 1
+    chunks_first = data1["chunks_created"]
+
+    # Re-index with a different function (more statements)
+    src.write_text(_make_large_function("evolving_func", n_stmts=50), encoding="utf-8")
+    index_repository(str(repo), index_dir=index_dir, force_reindex=True)
+
+    # chunk_repository should rechunk the updated function (new function_id, no existing chunks)
+    data2 = json.loads(chunk_repository(str(repo), index_dir=index_dir))
+    assert data2["functions_chunked"] == 1
+    assert data2["chunks_created"] >= 1
+
+    # Stored count must reflect only the new chunks, not old + new
+    registry = MethodRegistry(index_dir)
+    total_stored = registry.get_chunk_count()
+    registry.close()
+
+    assert total_stored == data2["chunks_created"]
+
+
+def test_reindexing_removes_orphaned_chunks(tmp_path):
+    """delete_by_file must cascade-delete chunks for the removed methods."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    src = repo / "module.py"
+    index_dir = str(tmp_path / "index")
+
+    # Index and chunk the file
+    src.write_text(_make_large_function(n_stmts=35), encoding="utf-8")
+    index_repository(str(repo), index_dir=index_dir)
+    chunk_repository(str(repo), index_dir=index_dir)
+
+    registry = MethodRegistry(index_dir)
+    assert registry.get_chunk_count() > 0, "Expected chunks to be stored"
+    registry.close()
+
+    # Re-index with a small function — no large functions, so no chunks should remain
+    src.write_text(_make_small_function(), encoding="utf-8")
+    index_repository(str(repo), index_dir=index_dir, force_reindex=True)
+
+    # Old orphaned chunks must have been cascade-deleted by delete_by_file
+    registry = MethodRegistry(index_dir)
+    orphan_count = registry.get_chunk_count()
+    registry.close()
+
+    assert orphan_count == 0, (
+        f"Expected 0 orphaned chunks after re-index, got {orphan_count}"
+    )
+
+
+def test_only_new_function_chunked_when_stable_already_chunked(tmp_path):
+    """A function already chunked is skipped; a newly indexed function is chunked."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    index_dir = str(tmp_path / "index")
+
+    # Index and chunk only the stable file first
+    (repo / "stable.py").write_text(_make_large_function("stable_func", n_stmts=35), encoding="utf-8")
+    index_repository(str(repo), index_dir=index_dir)
+    chunk_repository(str(repo), index_dir=index_dir)
+
+    registry = MethodRegistry(index_dir)
+    methods_before = {m["name"]: m for m in registry.get_all_methods()}
+    stable_id_before = methods_before["stable_func"]["id"]
+    stable_chunks_before = len(registry.get_chunks_by_function(stable_id_before))
+    registry.close()
+
+    # Add a brand-new large function in a second file (not yet indexed)
+    (repo / "new.py").write_text(_make_large_function("new_func", n_stmts=40), encoding="utf-8")
+    # index_repository with force_reindex=False skips already-indexed files,
+    # so only new.py is indexed here and stable.py keeps its original method IDs.
+    index_repository(str(repo), index_dir=index_dir)
+
+    # chunk_repository: stable_func already has chunks → skipped; new_func → chunked
+    data = json.loads(chunk_repository(str(repo), index_dir=index_dir))
+    assert data["functions_chunked"] == 1
+
+    registry = MethodRegistry(index_dir)
+    methods_after = {m["name"]: m for m in registry.get_all_methods()}
+    # stable_func must retain its original ID and the same chunks
+    assert methods_after["stable_func"]["id"] == stable_id_before
+    stable_chunks_after = len(registry.get_chunks_by_function(stable_id_before))
+    registry.close()
+
+    assert stable_chunks_after == stable_chunks_before

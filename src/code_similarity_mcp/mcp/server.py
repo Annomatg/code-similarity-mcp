@@ -396,6 +396,7 @@ def chunk_repository(
     repository_root: str,
     index_dir: str | None = None,
     max_statements_per_chunk: int = 10,
+    force_rechunk: bool = False,
 ) -> str:
     """
     Run the full chunking pipeline on large functions in a repository.
@@ -405,12 +406,18 @@ def chunk_repository(
     pipeline on each.  Chunk metadata and embeddings are stored in the index
     for later retrieval and similarity search.
 
+    Re-running on an already-chunked repository is safe: functions whose
+    chunks are already stored are skipped so no duplicate records are created.
+    Set force_rechunk=True to replace existing chunks unconditionally.
+
     Args:
         repository_root: Root directory of the repository used to filter
             which indexed functions to process.
         index_dir: Index directory (default: ~/.code-similarity-mcp/index).
         max_statements_per_chunk: Hard cap on the number of statements per
             chunk (default: 10).
+        force_rechunk: If true, re-chunk functions even if chunks are already
+            stored (replaces existing chunks). Default: false.
 
     Returns:
         JSON summary: { files_scanned, functions_chunked, chunks_created }
@@ -442,6 +449,17 @@ def chunk_repository(
 
     for method in repo_methods:
         if count_statements(method["body_code"]) <= _CHUNK_MIN_STATEMENTS:
+            continue
+
+        # Skip functions that are already chunked unless a re-chunk is forced.
+        # A function whose code hasn't changed retains its DB id, so existing
+        # chunks (if any) are always current — no need to recompute them.
+        if not force_rechunk and registry.get_chunks_by_function(method["id"]):
+            log.debug(
+                "Skipping already-chunked function %s (%s)",
+                method["name"],
+                method["file_path"],
+            )
             continue
 
         try:

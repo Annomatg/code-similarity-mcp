@@ -144,8 +144,38 @@ class MethodRegistry:
         self._save_index()
         return True
 
+    def _delete_chunks_for_methods(self, method_ids: list[int]) -> int:
+        """Delete all chunks for the given method IDs.
+
+        Updates *_chunk_id_map* in memory but does **not** commit or save the
+        chunk FAISS index — the caller is responsible for both.  Returns the
+        number of chunk rows removed.
+        """
+        if not method_ids:
+            return 0
+        placeholders = ",".join("?" * len(method_ids))
+        cur = self._conn.execute(
+            f"SELECT faiss_pos FROM chunks WHERE function_id IN ({placeholders})",
+            method_ids,
+        )
+        chunk_rows = cur.fetchall()
+        if not chunk_rows:
+            return 0
+
+        self._conn.execute(
+            f"DELETE FROM chunks WHERE function_id IN ({placeholders})",
+            method_ids,
+        )
+        for (faiss_pos,) in chunk_rows:
+            if faiss_pos is not None:
+                self._chunk_id_map.pop(faiss_pos, None)
+        return len(chunk_rows)
+
     def delete_by_file(self, file_path: str) -> int:
-        """Remove all methods for a file. Returns count removed."""
+        """Remove all methods for a file and cascade-delete their chunks.
+
+        Returns the number of method rows removed.
+        """
         cur = self._conn.execute(
             "SELECT id, faiss_pos FROM methods WHERE file_path=?", (file_path,)
         )
@@ -153,14 +183,26 @@ class MethodRegistry:
         if not rows:
             return 0
 
+        method_ids = [row[0] for row in rows]
+
+        # Cascade: remove chunks that belong to these methods before deleting
+        # the methods themselves so that re-indexing a file never leaves orphaned
+        # chunk records referencing function IDs that no longer exist.
+        chunks_removed = self._delete_chunks_for_methods(method_ids)
+
         self._conn.execute("DELETE FROM methods WHERE file_path=?", (file_path,))
         self._conn.commit()
 
-        # Mark FAISS positions as invalid in the id_map
+        # Update method FAISS id map
         positions = {row[1] for row in rows if row[1] is not None}
         for pos in positions:
             self._id_map.pop(pos, None)
         self._save_index()
+
+        # Persist chunk FAISS id map only if anything was actually removed
+        if chunks_removed > 0:
+            self._save_chunk_index()
+
         return len(rows)
 
     # ------------------------------------------------------------------
