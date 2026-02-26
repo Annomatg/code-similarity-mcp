@@ -375,6 +375,13 @@ class MethodRegistry:
         )
         return [self._chunk_row_to_dict(r) for r in cur.fetchall()]
 
+    def get_chunks_by_file(self, file_path: str) -> list[dict]:
+        """Return all stored chunks for a file."""
+        cur = self._conn.execute(
+            "SELECT * FROM chunks WHERE file_path=?", (file_path,)
+        )
+        return [self._chunk_row_to_dict(r) for r in cur.fetchall()]
+
     def _chunk_row_to_dict(self, row) -> dict:
         cols = [
             d[0]

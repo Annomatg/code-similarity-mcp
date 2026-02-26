@@ -599,6 +599,177 @@ def analyze_chunks(
 
 
 # ---------------------------------------------------------------------------
+# Tool: get_chunk_map
+# ---------------------------------------------------------------------------
+
+
+def _is_dag(n: int, deps: list[list[int]]) -> bool:
+    """Return True if the directed dependency graph has no cycles.
+
+    *deps[i]* is the list of chunk indices that chunk *i* depends on
+    (i.e. directed edges go i → deps[i][j]).
+    """
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = [WHITE] * n
+
+    def dfs(v: int) -> bool:
+        color[v] = GRAY
+        for w in deps[v]:
+            if w < 0 or w >= n:
+                continue
+            if color[w] == GRAY:
+                return False  # back-edge → cycle
+            if color[w] == WHITE and not dfs(w):
+                return False
+        color[v] = BLACK
+        return True
+
+    return all(dfs(v) for v in range(n) if color[v] == WHITE)
+
+
+def _normalized_code_for_chunk(
+    chunk: dict,
+    body_code: str,
+    language: str = "python",
+) -> str:
+    """Reconstruct the normalized code for a stored chunk.
+
+    Replicates the logic from :func:`embed_chunks`: extracts the source lines
+    covered by the chunk's statement indices, wraps them in a dummy function,
+    and normalizes with the language normalizer.
+    """
+    from code_similarity_mcp.normalizer.registry import get_normalizer
+
+    statements = get_flat_statements(body_code)
+    stmt_infos = [statements[idx] for idx in chunk["statement_indices"]]
+    start_line = min(s.start_line for s in stmt_infos)
+    end_line = max(s.end_line for s in stmt_infos)
+
+    source_lines = body_code.splitlines()
+    chunk_source = "\n".join(source_lines[start_line - 1 : end_line])
+    indented = "\n".join("    " + line for line in chunk_source.splitlines())
+    wrapped = "def _chunk_func():\n" + indented
+
+    return get_normalizer(language).normalize(wrapped)
+
+
+def _build_function_map(method: dict, chunks: list[dict]) -> dict:
+    """Build a single-function chunk map dict from registry data."""
+    sorted_chunks = sorted(chunks, key=lambda c: c["chunk_index"])
+    language = method.get("language", "python")
+
+    chunk_entries = []
+    for c in sorted_chunks:
+        try:
+            norm_code = _normalized_code_for_chunk(c, method["body_code"], language)
+        except Exception:
+            norm_code = ""
+
+        chunk_entries.append({
+            "chunk_id": c["id"],
+            "chunk_index": c["chunk_index"],
+            "statement_range": [c["statement_start"], c["statement_end"]],
+            "dependencies": c["depends_on_chunks"],
+            "normalized_code": norm_code,
+        })
+
+    n = len(sorted_chunks)
+    deps = [c["depends_on_chunks"] for c in sorted_chunks]
+    dag_valid = _is_dag(n, deps)
+
+    return {
+        "function_id": method["id"],
+        "function_name": method["name"],
+        "file": method["file_path"],
+        "dag_valid": dag_valid,
+        "chunks": chunk_entries,
+    }
+
+
+@app.tool()
+def get_chunk_map(
+    function_id: int | None = None,
+    file_path: str | None = None,
+    index_dir: str | None = None,
+) -> str:
+    """
+    Return the complete chunk-level map for a given function or file.
+
+    Returns all chunks, their metadata (statement range, inter-chunk
+    dependencies, normalized code), and a DAG validity flag for each function.
+
+    Args:
+        function_id: Database id of a specific function (mutually exclusive
+            with file_path).
+        file_path: Absolute path to a source file — returns maps for all
+            chunked functions in that file (mutually exclusive with function_id).
+        index_dir: Index directory to query.
+
+    Returns:
+        JSON with a 'functions' list.  Each entry contains function_id,
+        function_name, file, dag_valid, and chunks (list of chunk objects
+        with chunk_id, chunk_index, statement_range, dependencies,
+        normalized_code).
+    """
+    log.info(
+        "get_chunk_map called: function_id=%s file_path=%s",
+        function_id,
+        file_path,
+    )
+
+    if function_id is None and file_path is None:
+        return json.dumps({"error": "Provide either function_id or file_path"})
+    if function_id is not None and file_path is not None:
+        return json.dumps({"error": "Provide either function_id or file_path, not both"})
+
+    registry = _get_registry(index_dir)
+
+    if function_id is not None:
+        chunks = registry.get_chunks_by_function(function_id)
+        if not chunks:
+            registry.close()
+            log.info("get_chunk_map: no chunks for function_id=%d", function_id)
+            return json.dumps({"functions": []})
+
+        method = registry._get_method_by_id(function_id)
+        if method is None:
+            registry.close()
+            return json.dumps({"error": f"Function id {function_id} not found"})
+
+        result = {"functions": [_build_function_map(method, chunks)]}
+    else:
+        chunks = registry.get_chunks_by_file(file_path)
+        if not chunks:
+            registry.close()
+            log.info("get_chunk_map: no chunks for file_path=%s", file_path)
+            return json.dumps({"functions": []})
+
+        # Group chunks by function_id and resolve method metadata.
+        from collections import defaultdict
+        by_function: dict[int, list[dict]] = defaultdict(list)
+        for c in chunks:
+            by_function[c["function_id"]].append(c)
+
+        functions = []
+        for fid, fchunks in by_function.items():
+            method = registry._get_method_by_id(fid)
+            if method is None:
+                continue
+            functions.append(_build_function_map(method, fchunks))
+
+        # Sort by function name for deterministic output.
+        functions.sort(key=lambda f: f["function_name"])
+        result = {"functions": functions}
+
+    registry.close()
+    log.info(
+        "get_chunk_map done: %d functions returned",
+        len(result["functions"]),
+    )
+    return json.dumps(result, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
