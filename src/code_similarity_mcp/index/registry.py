@@ -390,3 +390,49 @@ class MethodRegistry:
         """Return total number of stored chunks."""
         cur = self._conn.execute("SELECT COUNT(*) FROM chunks")
         return cur.fetchone()[0]
+
+    def get_chunk_by_id(self, chunk_id: int) -> dict | None:
+        """Return a single chunk by its DB id, or None if not found."""
+        cur = self._conn.execute("SELECT * FROM chunks WHERE id=?", (chunk_id,))
+        row = cur.fetchone()
+        return self._chunk_row_to_dict(row) if row else None
+
+    def get_chunk_embedding(self, faiss_pos: int) -> np.ndarray | None:
+        """Reconstruct the stored chunk embedding vector for a given FAISS position."""
+        if faiss_pos is None or faiss_pos < 0 or faiss_pos >= self._chunks_index.ntotal:
+            return None
+        vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+        self._chunks_index.reconstruct(faiss_pos, vec)
+        return vec
+
+    def search_chunks(
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 10,
+        allowed_chunk_ids: set[int] | None = None,
+    ) -> list[dict]:
+        """Return top-k similar chunks by embedding similarity.
+
+        If *allowed_chunk_ids* is provided, only chunks whose DB id is in that
+        set are returned.  Pass an empty set to short-circuit (returns []).
+        """
+        if self._chunks_index.ntotal == 0:
+            return []
+        if allowed_chunk_ids is not None and not allowed_chunk_ids:
+            return []
+        vec = query_embedding.reshape(1, -1).astype(np.float32)
+        k = min(top_k, self._chunks_index.ntotal)
+        scores, positions = self._chunks_index.search(vec, k)
+
+        results = []
+        for score, pos in zip(scores[0], positions[0]):
+            if pos < 0 or pos not in self._chunk_id_map:
+                continue
+            chunk_db_id = self._chunk_id_map[pos]
+            if allowed_chunk_ids is not None and chunk_db_id not in allowed_chunk_ids:
+                continue
+            row = self.get_chunk_by_id(chunk_db_id)
+            if row:
+                row["embedding_score"] = float(score)
+                results.append(row)
+        return results

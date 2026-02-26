@@ -62,8 +62,8 @@ def test_registered_tools_include_analyze_new_code():
     assert "analyze_new_code" in names
 
 
-def test_exactly_five_tools_registered():
-    """Exactly the five expected tools should be registered."""
+def test_exactly_six_tools_registered():
+    """Exactly the six expected tools should be registered."""
     from code_similarity_mcp.mcp.server import app
 
     tools = asyncio.run(app.list_tools())
@@ -74,6 +74,7 @@ def test_exactly_five_tools_registered():
         "analyze_project",
         "find_large_functions",
         "chunk_repository",
+        "analyze_chunks",
     }
 
 

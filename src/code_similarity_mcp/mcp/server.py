@@ -497,6 +497,108 @@ def chunk_repository(
 
 
 # ---------------------------------------------------------------------------
+# Tool: analyze_chunks
+# ---------------------------------------------------------------------------
+
+def _refactoring_hint(score: float) -> str:
+    if score >= 0.99:
+        return "Exact duplicate chunk. Consider extracting to a shared helper function."
+    if score >= 0.85:
+        return "Very similar chunk. Consider consolidating this logic."
+    if score >= 0.70:
+        return "Related chunk. Review for potential refactoring opportunities."
+    return "Loosely similar chunk. Low refactoring priority."
+
+
+@app.tool()
+def analyze_chunks(
+    code_snippet: str | None = None,
+    chunk_id: int | None = None,
+    top_k: int = 3,
+    index_dir: str | None = None,
+) -> str:
+    """
+    Search for similar stored chunks.
+
+    Given a raw code snippet or the id of a stored chunk, return the top-k
+    most similar chunks with scores and refactoring hints.
+
+    Args:
+        code_snippet: Code fragment to search for (mutually exclusive with chunk_id).
+        chunk_id: DB id of a stored chunk to use as the query (mutually exclusive
+            with code_snippet).  The query chunk itself is excluded from results.
+        top_k: Number of results to return (default: 3).
+        index_dir: Index directory to query.
+
+    Returns:
+        JSON with a 'results' list, each item containing:
+        chunk_id, function_name, file, similarity_score, statement_range,
+        refactoring_hint.
+    """
+    log.info(
+        "analyze_chunks called: chunk_id=%s snippet_len=%s top_k=%d",
+        chunk_id,
+        len(code_snippet) if code_snippet else None,
+        top_k,
+    )
+
+    if code_snippet is None and chunk_id is None:
+        return json.dumps({"error": "Provide either code_snippet or chunk_id"})
+    if code_snippet is not None and chunk_id is not None:
+        return json.dumps({"error": "Provide either code_snippet or chunk_id, not both"})
+
+    registry = _get_registry(index_dir)
+
+    if registry.get_chunk_count() == 0:
+        registry.close()
+        log.info("analyze_chunks: chunk index is empty")
+        return json.dumps({"results": []})
+
+    exclude_id: int | None = None
+
+    if chunk_id is not None:
+        chunk = registry.get_chunk_by_id(chunk_id)
+        if chunk is None:
+            registry.close()
+            return json.dumps({"error": f"Chunk id {chunk_id} not found"})
+        embedding = registry.get_chunk_embedding(chunk["faiss_pos"])
+        if embedding is None:
+            registry.close()
+            return json.dumps({"error": f"Embedding not found for chunk id {chunk_id}"})
+        exclude_id = chunk_id
+    else:
+        # Wrap snippet in a dummy function so the normalizer can process it.
+        indented = "\n".join(f"    {line}" for line in code_snippet.splitlines())
+        wrapped = f"def _chunk_func():\n{indented}\n"
+        normalized = normalize_code(wrapped, "python")
+        embedding = _generator.encode_one(normalized)
+
+    # Fetch enough candidates to account for self-exclusion.
+    fetch_k = top_k + 1 if exclude_id is not None else top_k
+    raw = registry.search_chunks(embedding, top_k=fetch_k)
+
+    output: list[dict] = []
+    for r in raw:
+        if r["id"] == exclude_id:
+            continue
+        if len(output) >= top_k:
+            break
+        score = r["embedding_score"]
+        output.append({
+            "chunk_id": r["id"],
+            "function_name": r["function_name"],
+            "file": r["file_path"],
+            "similarity_score": round(score, 4),
+            "statement_range": [r["statement_start"], r["statement_end"]],
+            "refactoring_hint": _refactoring_hint(score),
+        })
+
+    registry.close()
+    log.info("analyze_chunks done: %d results returned", len(output))
+    return json.dumps({"results": output}, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
