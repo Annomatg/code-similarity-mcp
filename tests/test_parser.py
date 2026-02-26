@@ -8,7 +8,7 @@ import pytest
 from code_similarity_mcp.parser.python import (
     PythonParser, count_statements, get_top_level_statements, build_dependency_graph,
 )
-from code_similarity_mcp.parser.base import MethodInfo, StatementInfo
+from code_similarity_mcp.parser.base import DependencyGraph, MethodInfo, StatementInfo
 from code_similarity_mcp.parser.registry import get_parser, SUPPORTED_EXTENSIONS
 
 
@@ -862,15 +862,37 @@ class TestGetTopLevelStatements:
 # ---------------------------------------------------------------------------
 
 class TestBuildDependencyGraph:
+    """Tests for build_dependency_graph.
+
+    The function flattens ALL statements (top-level + nested) into a single
+    list.  Compound statements (for/while/if/with/try) are processed
+    header-only for data-flow; their body statements are separate flat nodes.
+
+    Index mapping for compound-containing functions:
+      - Simple statements keep their sequential flat index.
+      - A compound header (e.g. for/while/if) at flat index i is immediately
+        followed in the flat list by all its nested body statements, then by
+        the next top-level statement.
+    """
+
     # ------------------------------------------------------------------
     # Basic structure and edge cases
     # ------------------------------------------------------------------
 
-    def test_no_function_returns_empty_dict(self):
-        assert build_dependency_graph("x = 1\n") == {}
+    def test_no_function_returns_empty_graph(self):
+        g = build_dependency_graph("x = 1\n")
+        assert g.num_statements == 0
+        assert g.data == {}
+        assert g.control_flow == {}
 
-    def test_empty_string_returns_empty_dict(self):
-        assert build_dependency_graph("") == {}
+    def test_empty_string_returns_empty_graph(self):
+        g = build_dependency_graph("")
+        assert g.num_statements == 0
+
+    def test_returns_dependency_graph_type(self):
+        code = "def f():\n    pass\n"
+        g = build_dependency_graph(code)
+        assert isinstance(g, DependencyGraph)
 
     def test_all_statement_indices_are_keys(self):
         code = textwrap.dedent("""\
@@ -880,15 +902,17 @@ class TestBuildDependencyGraph:
                 c = 3
         """)
         g = build_dependency_graph(code)
-        assert sorted(g.keys()) == [0, 1, 2]
+        assert sorted(g.data.keys()) == [0, 1, 2]
+        assert sorted(g.control_flow.keys()) == [0, 1, 2]
 
     def test_single_pass_statement_no_edges(self):
         code = "def f():\n    pass\n"
         g = build_dependency_graph(code)
-        assert g == {0: []}
+        assert g.data == {0: []}
+        assert g.control_flow == {0: []}
 
     # ------------------------------------------------------------------
-    # Simple sequential assignments
+    # Simple sequential assignments (no compound statements)
     # ------------------------------------------------------------------
 
     def test_simple_dependency(self):
@@ -898,7 +922,7 @@ class TestBuildDependencyGraph:
                 y = x + 1
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]
+        assert 1 in g.data[0]
 
     def test_no_dependency_when_vars_independent(self):
         code = textwrap.dedent("""\
@@ -907,8 +931,8 @@ class TestBuildDependencyGraph:
                 y = 2
         """)
         g = build_dependency_graph(code)
-        assert g[0] == []
-        assert g[1] == []
+        assert g.data[0] == []
+        assert g.data[1] == []
 
     def test_return_reads_variable(self):
         code = textwrap.dedent("""\
@@ -917,7 +941,7 @@ class TestBuildDependencyGraph:
                 return result
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]
+        assert 1 in g.data[0]
 
     # ------------------------------------------------------------------
     # Multiple consumers and fanout
@@ -931,8 +955,8 @@ class TestBuildDependencyGraph:
                 z = x + 2
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]
-        assert 2 in g[0]
+        assert 1 in g.data[0]
+        assert 2 in g.data[0]
 
     def test_multiple_producers_one_consumer(self):
         code = textwrap.dedent("""\
@@ -942,8 +966,8 @@ class TestBuildDependencyGraph:
                 c = a + b
         """)
         g = build_dependency_graph(code)
-        assert 2 in g[0]
-        assert 2 in g[1]
+        assert 2 in g.data[0]
+        assert 2 in g.data[1]
 
     # ------------------------------------------------------------------
     # Transitive / chain dependencies
@@ -958,9 +982,9 @@ class TestBuildDependencyGraph:
                 c = finalize(b)
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]   # a → b
-        assert 2 in g[1]   # b → c
-        assert 2 not in g[0]  # no direct a → c edge
+        assert 1 in g.data[0]       # a → b
+        assert 2 in g.data[1]       # b → c
+        assert 2 not in g.data[0]   # no direct a → c edge
 
     def test_transitive_path_exists(self):
         """Transitive dependency is reachable via the graph."""
@@ -973,13 +997,13 @@ class TestBuildDependencyGraph:
         """)
         g = build_dependency_graph(code)
         # Chain: 0→1→2→3
-        assert 1 in g[0]
-        assert 2 in g[1]
-        assert 3 in g[2]
+        assert 1 in g.data[0]
+        assert 2 in g.data[1]
+        assert 3 in g.data[2]
         # No skip edges
-        assert 2 not in g[0]
-        assert 3 not in g[0]
-        assert 3 not in g[1]
+        assert 2 not in g.data[0]
+        assert 3 not in g.data[0]
+        assert 3 not in g.data[1]
 
     # ------------------------------------------------------------------
     # Augmented assignment (reads AND writes same variable)
@@ -993,14 +1017,16 @@ class TestBuildDependencyGraph:
                 return total
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]  # total written at 0, read by augmented at 1
-        assert 2 in g[1]  # total written by augmented at 1, read at 2
+        assert 1 in g.data[0]  # total written at 0, read by augmented at 1
+        assert 2 in g.data[1]  # total written by augmented at 1, read at 2
 
     # ------------------------------------------------------------------
     # For loop
+    # Flat indices: 0=for_header, 1=pass (nested), 2=last=item (top-level)
     # ------------------------------------------------------------------
 
     def test_for_loop_writes_loop_var(self):
+        # flat: 0=for(parent=None), 1=pass(parent=0), 2=last=item(parent=None)
         code = textwrap.dedent("""\
             def f(items):
                 for item in items:
@@ -1008,10 +1034,12 @@ class TestBuildDependencyGraph:
                 last = item
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]  # item written by for (0), read by assignment (1)
+        # item written by for header (0), read by assignment (2)
+        assert 2 in g.data[0]
 
     def test_for_loop_body_writes_tracked(self):
-        """Variables assigned inside the for body are tracked as writes of the for stmt."""
+        """Variables written inside the for body are separate flat nodes."""
+        # flat: 0=total=0, 1=for_header(parent=None), 2=total+=x(parent=1), 3=return(parent=None)
         code = textwrap.dedent("""\
             def f(items):
                 total = 0
@@ -1020,16 +1048,19 @@ class TestBuildDependencyGraph:
                 return total
         """)
         g = build_dependency_graph(code)
-        # total written at 0, read inside for body at 1
-        assert 1 in g[0]
-        # total also written by for body at 1, read by return at 2
-        assert 2 in g[1]
+        # total=0 (idx 0) → total+=x (idx 2): total is read at 2
+        assert 2 in g.data[0]
+        # for header (idx 1) writes x → total+=x (idx 2) reads x
+        assert 2 in g.data[1]
+        # total+=x (idx 2) writes total → return (idx 3) reads total
+        assert 3 in g.data[2]
 
     # ------------------------------------------------------------------
     # If statement
     # ------------------------------------------------------------------
 
     def test_if_body_writes_propagate(self):
+        # flat: 0=if_header(parent=None), 1=result=1(parent=0), 2=return(parent=None)
         code = textwrap.dedent("""\
             def f(cond):
                 if cond:
@@ -1037,10 +1068,11 @@ class TestBuildDependencyGraph:
                 return result
         """)
         g = build_dependency_graph(code)
-        # result written inside if body (stmt 0), read by return (stmt 1)
-        assert 1 in g[0]
+        # result written in if body (idx 1), read by return (idx 2)
+        assert 2 in g.data[1]
 
     def test_if_condition_reads_variable(self):
+        # flat: 0=x=compute(), 1=if_header(parent=None), 2=pass(parent=1)
         code = textwrap.dedent("""\
             def f():
                 x = compute()
@@ -1048,9 +1080,11 @@ class TestBuildDependencyGraph:
                     pass
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]  # x written at 0, read in if condition at 1
+        # x written at 0, read in if condition at 1 — indices unchanged
+        assert 1 in g.data[0]
 
     def test_elif_else_writes_tracked(self):
+        # flat: 0=if_header(None), 1=v=1(parent=0), 2=v=2(parent=0), 3=return(None)
         code = textwrap.dedent("""\
             def f(cond):
                 if cond:
@@ -1060,14 +1094,17 @@ class TestBuildDependencyGraph:
                 return v
         """)
         g = build_dependency_graph(code)
-        # v written in if/else (stmt 0), read by return (stmt 1)
-        assert 1 in g[0]
+        # v written in if branch (idx 1), read by return (idx 3)
+        assert 3 in g.data[1]
+        # v written in else branch (idx 2), read by return (idx 3)
+        assert 3 in g.data[2]
 
     # ------------------------------------------------------------------
     # While loop
     # ------------------------------------------------------------------
 
     def test_while_loop_condition_and_body(self):
+        # flat: 0=n=10, 1=while_header(None), 2=n-=1(parent=1), 3=return(None)
         code = textwrap.dedent("""\
             def f():
                 n = 10
@@ -1076,8 +1113,10 @@ class TestBuildDependencyGraph:
                 return n
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]  # n written at 0, read in while condition at 1
-        assert 2 in g[1]  # n written in while body at 1, read at return 2
+        # n written at 0, read in while condition at 1
+        assert 1 in g.data[0]
+        # n written by n-=1 (idx 2), read by return (idx 3)
+        assert 3 in g.data[2]
 
     # ------------------------------------------------------------------
     # Import statements
@@ -1091,8 +1130,8 @@ class TestBuildDependencyGraph:
                 return result
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]  # re written by import (0), read at stmt 1
-        assert 2 in g[1]  # result written at 1, read at return 2
+        assert 1 in g.data[0]  # re written by import (0), read at stmt 1
+        assert 2 in g.data[1]  # result written at 1, read at return 2
 
     def test_from_import_writes_name(self):
         code = textwrap.dedent("""\
@@ -1102,11 +1141,13 @@ class TestBuildDependencyGraph:
                 return full
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]  # path written by import (0), read at stmt 1
-        assert 2 in g[1]
+        assert 1 in g.data[0]  # path written by import (0), read at stmt 1
+        assert 2 in g.data[1]
 
     # ------------------------------------------------------------------
     # Try/except
+    # flat: 0=try_header(None), 1=result=compute()(parent=0),
+    #       2=result=None(parent=0), 3=return(None)
     # ------------------------------------------------------------------
 
     def test_try_body_writes_tracked(self):
@@ -1119,8 +1160,10 @@ class TestBuildDependencyGraph:
                 return result
         """)
         g = build_dependency_graph(code)
-        # result written in try/except body (stmt 0), read by return (stmt 1)
-        assert 1 in g[0]
+        # result written in try body (idx 1), read by return (idx 3)
+        assert 3 in g.data[1]
+        # result written in except body (idx 2), read by return (idx 3)
+        assert 3 in g.data[2]
 
     # ------------------------------------------------------------------
     # Tuple unpacking
@@ -1133,7 +1176,7 @@ class TestBuildDependencyGraph:
                 c = a + b
         """)
         g = build_dependency_graph(code)
-        assert 1 in g[0]  # a and b written at 0, both read at 1
+        assert 1 in g.data[0]  # a and b written at 0, both read at 1
 
     # ------------------------------------------------------------------
     # Public API
@@ -1142,3 +1185,204 @@ class TestBuildDependencyGraph:
     def test_importable_from_package(self):
         from code_similarity_mcp.parser import build_dependency_graph as bdg
         assert callable(bdg)
+
+    def test_dependency_graph_importable_from_package(self):
+        from code_similarity_mcp.parser import DependencyGraph as DG
+        assert DG is DependencyGraph
+
+
+# ---------------------------------------------------------------------------
+# Control-flow edges in build_dependency_graph
+# ---------------------------------------------------------------------------
+
+class TestControlFlowEdges:
+    """Tests that build_dependency_graph correctly populates control_flow edges.
+
+    Control-flow edges come in two flavours:
+    1. Header → body-child: each direct body statement depends on its
+       enclosing compound header.
+    2. Header → fall-through: the first statement at the same nesting level
+       that follows the compound statement.
+    """
+
+    # ------------------------------------------------------------------
+    # For loop
+    # ------------------------------------------------------------------
+
+    def test_for_body_stmts_depend_on_header(self):
+        # flat: 0=for_header, 1=y=i (body), 2=z=y+1 (body), 3=return (top)
+        code = textwrap.dedent("""\
+            def f(items):
+                for i in items:
+                    y = i
+                    z = y + 1
+                return z
+        """)
+        g = build_dependency_graph(code)
+        # Both body statements (1 and 2) must have a CF edge from header (0)
+        assert 1 in g.control_flow[0]
+        assert 2 in g.control_flow[0]
+
+    def test_for_fall_through_to_next_top_level(self):
+        # flat: 0=for_header(None), 1=pass(parent=0), 2=result(None)
+        code = textwrap.dedent("""\
+            def f(items):
+                for item in items:
+                    pass
+                result = done()
+        """)
+        g = build_dependency_graph(code)
+        # Fall-through: for (0) → result (2)
+        assert 2 in g.control_flow[0]
+
+    def test_for_body_not_cf_edge_for_simple_stmts(self):
+        """Simple (non-compound) statements produce no CF edges."""
+        code = textwrap.dedent("""\
+            def f():
+                x = 1
+                y = 2
+        """)
+        g = build_dependency_graph(code)
+        assert g.control_flow[0] == []
+        assert g.control_flow[1] == []
+
+    # ------------------------------------------------------------------
+    # While loop
+    # ------------------------------------------------------------------
+
+    def test_while_body_stmts_depend_on_header(self):
+        # flat: 0=n=10, 1=while_header, 2=n-=1 (body), 3=return (top)
+        code = textwrap.dedent("""\
+            def f():
+                n = 10
+                while n > 0:
+                    n -= 1
+                return n
+        """)
+        g = build_dependency_graph(code)
+        # Body statement (2) has CF edge from while header (1)
+        assert 2 in g.control_flow[1]
+
+    def test_while_fall_through(self):
+        code = textwrap.dedent("""\
+            def f():
+                n = 10
+                while n > 0:
+                    n -= 1
+                return n
+        """)
+        g = build_dependency_graph(code)
+        # Fall-through: while (1) → return (3)
+        assert 3 in g.control_flow[1]
+
+    # ------------------------------------------------------------------
+    # If / elif / else
+    # ------------------------------------------------------------------
+
+    def test_if_body_stmt_depends_on_header(self):
+        # flat: 0=if_header(None), 1=result=1(parent=0), 2=return(None)
+        code = textwrap.dedent("""\
+            def f(cond):
+                if cond:
+                    result = 1
+                return result
+        """)
+        g = build_dependency_graph(code)
+        # Body statement (1) has CF edge from if header (0)
+        assert 1 in g.control_flow[0]
+
+    def test_if_else_both_branches_depend_on_header(self):
+        # flat: 0=if_header(None), 1=v=1(parent=0), 2=v=2(parent=0), 3=return(None)
+        code = textwrap.dedent("""\
+            def f(cond):
+                if cond:
+                    v = 1
+                else:
+                    v = 2
+                return v
+        """)
+        g = build_dependency_graph(code)
+        # Both branches (1 and 2) depend on the if header (0)
+        assert 1 in g.control_flow[0]
+        assert 2 in g.control_flow[0]
+
+    def test_if_fall_through(self):
+        code = textwrap.dedent("""\
+            def f(cond):
+                if cond:
+                    v = 1
+                else:
+                    v = 2
+                return v
+        """)
+        g = build_dependency_graph(code)
+        # Fall-through: if (0) → return (3)
+        assert 3 in g.control_flow[0]
+
+    # ------------------------------------------------------------------
+    # Nested compound statements
+    # ------------------------------------------------------------------
+
+    def test_nested_if_inside_for(self):
+        # flat: 0=for(None), 1=if(parent=0), 2=y=1(parent=1), 3=return(None)
+        code = textwrap.dedent("""\
+            def f(items):
+                for x in items:
+                    if x > 0:
+                        y = x
+                return y
+        """)
+        g = build_dependency_graph(code)
+        # Outer for (0): body child is if (1)
+        assert 1 in g.control_flow[0]
+        # Fall-through of for (0) → return (3)
+        assert 3 in g.control_flow[0]
+        # Inner if (1): body child is y=x (2)
+        assert 2 in g.control_flow[1]
+
+    # ------------------------------------------------------------------
+    # Control-flow edges are distinct from data edges
+    # ------------------------------------------------------------------
+
+    def test_cf_and_data_edges_are_independent(self):
+        """A pair of statements can have a CF edge without a data edge."""
+        # flat: 0=for(None), 1=pass(parent=0), 2=x=1(None)
+        # CF: 0→1 (header→body), 0→2 (fall-through)
+        # Data: no shared variables between for header and x=1
+        code = textwrap.dedent("""\
+            def f(items):
+                for item in items:
+                    pass
+                x = 1
+        """)
+        g = build_dependency_graph(code)
+        # CF edge exists (fall-through)
+        assert 2 in g.control_flow[0]
+        # No data edge from for (0) to x=1 (2): x is unrelated to item/items
+        assert 2 not in g.data[0]
+
+    def test_num_statements_includes_nested(self):
+        """num_statements counts all flat nodes including nested body stmts."""
+        # flat: 0=for(None), 1=y=i(parent=0), 2=z=y(parent=0), 3=return(None)
+        code = textwrap.dedent("""\
+            def f(items):
+                for i in items:
+                    y = i
+                    z = y
+                return z
+        """)
+        g = build_dependency_graph(code)
+        assert g.num_statements == 4  # for + 2 body stmts + return
+
+    def test_all_indices_present_in_both_dicts(self):
+        """Every flat index 0..n-1 appears as a key in both data and control_flow."""
+        code = textwrap.dedent("""\
+            def f(items):
+                for i in items:
+                    y = i
+                return y
+        """)
+        g = build_dependency_graph(code)
+        expected = list(range(g.num_statements))
+        assert sorted(g.data.keys()) == expected
+        assert sorted(g.control_flow.keys()) == expected

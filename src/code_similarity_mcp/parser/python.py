@@ -7,7 +7,7 @@ from pathlib import Path
 import tree_sitter_python as tspython
 from tree_sitter import Language, Parser
 
-from .base import BaseParser, MethodInfo, StatementInfo
+from .base import BaseParser, DependencyGraph, MethodInfo, StatementInfo
 
 _PY_LANGUAGE = Language(tspython.language())
 
@@ -51,6 +51,16 @@ _PARAM_TYPES = frozenset({
 _SPLAT_TYPES = frozenset({
     "list_splat_pattern",
     "dictionary_splat_pattern",
+})
+
+# Compound statement types that have body blocks (used for CF-edge detection)
+_COMPOUND_TYPES = frozenset({
+    "for_statement",
+    "while_statement",
+    "if_statement",
+    "with_statement",
+    "try_statement",
+    "match_statement",
 })
 
 
@@ -287,11 +297,17 @@ def _collect_import_writes(node, source: bytes, writes: set) -> None:
                     writes.add(_node_text(alias, source))
 
 
-def _collect_stmt_wr(node, source: bytes, writes: set, reads: set) -> None:
+def _collect_stmt_wr(node, source: bytes, writes: set, reads: set,
+                     header_only: bool = False) -> None:
     """Recursively collect writes and reads from a statement node.
 
     Recurses into nested blocks (if/for/while/with/try bodies) but stops
     at nested function and class definitions (they introduce a new scope).
+
+    When *header_only* is ``True``, compound statements (for/while/if/with/try)
+    only process their header expressions — body blocks are skipped.  This is
+    used by the flat-statement dependency graph where nested body statements are
+    separate nodes with their own writes/reads.
     """
     t = node.type
 
@@ -329,37 +345,40 @@ def _collect_stmt_wr(node, source: bytes, writes: set, reads: set) -> None:
     elif t == "for_statement":
         left = node.child_by_field_name("left")
         right = node.child_by_field_name("right")
-        body = node.child_by_field_name("body")
-        alt = node.child_by_field_name("alternative")
         if left is not None:
             _collect_lhs_writes(left, source, writes)
         if right is not None:
             _collect_reads_expr(right, source, reads)
-        if body is not None:
-            _collect_stmt_wr(body, source, writes, reads)
-        if alt is not None:
-            _collect_stmt_wr(alt, source, writes, reads)
+        if not header_only:
+            body = node.child_by_field_name("body")
+            alt = node.child_by_field_name("alternative")
+            if body is not None:
+                _collect_stmt_wr(body, source, writes, reads)
+            if alt is not None:
+                _collect_stmt_wr(alt, source, writes, reads)
 
     elif t == "while_statement":
         cond = node.child_by_field_name("condition")
-        body = node.child_by_field_name("body")
-        alt = node.child_by_field_name("alternative")
         if cond is not None:
             _collect_reads_expr(cond, source, reads)
-        if body is not None:
-            _collect_stmt_wr(body, source, writes, reads)
-        if alt is not None:
-            _collect_stmt_wr(alt, source, writes, reads)
+        if not header_only:
+            body = node.child_by_field_name("body")
+            alt = node.child_by_field_name("alternative")
+            if body is not None:
+                _collect_stmt_wr(body, source, writes, reads)
+            if alt is not None:
+                _collect_stmt_wr(alt, source, writes, reads)
 
     elif t == "if_statement":
         cond = node.child_by_field_name("condition")
-        consequence = node.child_by_field_name("consequence")
         if cond is not None:
             _collect_reads_expr(cond, source, reads)
-        if consequence is not None:
-            _collect_stmt_wr(consequence, source, writes, reads)
-        for alt in node.children_by_field_name("alternative"):
-            _collect_stmt_wr(alt, source, writes, reads)
+        if not header_only:
+            consequence = node.child_by_field_name("consequence")
+            if consequence is not None:
+                _collect_stmt_wr(consequence, source, writes, reads)
+            for alt in node.children_by_field_name("alternative"):
+                _collect_stmt_wr(alt, source, writes, reads)
 
     elif t == "elif_clause":
         cond = node.child_by_field_name("condition")
@@ -392,13 +411,14 @@ def _collect_stmt_wr(node, source: bytes, writes: set, reads: set) -> None:
                     _collect_reads_expr(val, source, reads)
                 if alias is not None:
                     _collect_lhs_writes(alias, source, writes)
-            elif child.type == "block":
+            elif child.type == "block" and not header_only:
                 _collect_stmt_wr(child, source, writes, reads)
 
     elif t == "try_statement":
-        for child in node.children:
-            if child.is_named:
-                _collect_stmt_wr(child, source, writes, reads)
+        if not header_only:
+            for child in node.children:
+                if child.is_named:
+                    _collect_stmt_wr(child, source, writes, reads)
 
     elif t == "except_clause":
         # except ExcType as name: body
@@ -460,33 +480,133 @@ def _collect_stmt_wr(node, source: bytes, writes: set, reads: set) -> None:
 
 
 def _get_stmt_writes_reads(stmt_node, source: bytes) -> tuple[set[str], set[str]]:
-    """Return (writes, reads) variable sets for a single top-level statement."""
+    """Return (writes, reads) for a flat statement node.
+
+    Compound statements are processed *header only* — body blocks are excluded
+    because the flat dependency graph treats nested body statements as
+    independent nodes with their own writes/reads.
+    """
     writes: set[str] = set()
     reads: set[str] = set()
-    _collect_stmt_wr(stmt_node, source, writes, reads)
+    _collect_stmt_wr(stmt_node, source, writes, reads, header_only=True)
     return writes, reads
 
 
-def build_dependency_graph(code: str) -> dict[int, list[int]]:
-    """Build a variable dependency graph for the first function in *code*.
+def _flatten_stmts(block_node, source: bytes) -> list:
+    """Return a flat list of ``(node, parent_compound_idx)`` for all statements.
 
-    Analyzes the **top-level** statements of the function body.  For each
-    ordered pair (A, B) where A.index < B.index: if statement B reads a
-    variable written by statement A, a directed edge ``A → B`` is recorded.
+    Recursively expands compound statement bodies (for/while/if/with/try) so
+    that every statement — top-level or nested — receives a unique zero-based
+    index.  Top-level statements have ``parent_compound_idx=None``; nested
+    statements carry the flat index of their enclosing compound header.
+    """
+    result: list = []
+    _flatten_block(block_node, source, result, parent_idx=None)
+    return result
 
-    The returned graph is an adjacency list indexed by zero-based statement
-    index: ``graph[i]`` contains the sorted list of statement indices that
-    consume outputs produced by statement ``i``.
+
+def _flatten_block(block_node, source: bytes, result: list, parent_idx) -> None:
+    """Recursively append statements from *block_node* into *result*."""
+    for child in block_node.children:
+        if not (child.is_named and child.type in _STATEMENT_TYPES):
+            continue
+        my_idx = len(result)
+        result.append((child, parent_idx))
+
+        t = child.type
+        if t == "for_statement":
+            body = child.child_by_field_name("body")
+            if body is not None:
+                _flatten_block(body, source, result, my_idx)
+            alt = child.child_by_field_name("alternative")
+            if alt is not None:
+                _flatten_alt(alt, source, result, my_idx)
+
+        elif t == "while_statement":
+            body = child.child_by_field_name("body")
+            if body is not None:
+                _flatten_block(body, source, result, my_idx)
+            alt = child.child_by_field_name("alternative")
+            if alt is not None:
+                _flatten_alt(alt, source, result, my_idx)
+
+        elif t == "if_statement":
+            consequence = child.child_by_field_name("consequence")
+            if consequence is not None:
+                _flatten_block(consequence, source, result, my_idx)
+            for alt in child.children_by_field_name("alternative"):
+                _flatten_alt(alt, source, result, my_idx)
+
+        elif t == "with_statement":
+            for sub in child.children:
+                if sub.type == "block":
+                    _flatten_block(sub, source, result, my_idx)
+                    break
+
+        elif t == "try_statement":
+            for sub in child.children:
+                if sub.type == "block":
+                    _flatten_block(sub, source, result, my_idx)
+                elif sub.is_named and sub.type in (
+                    "except_clause",
+                    "except_group_clause",
+                    "else_clause",
+                    "finally_clause",
+                ):
+                    _flatten_alt(sub, source, result, my_idx)
+
+        elif t == "match_statement":
+            for sub in child.children:
+                if sub.type == "case_clause":
+                    for subsub in sub.children:
+                        if subsub.type == "block":
+                            _flatten_block(subsub, source, result, my_idx)
+
+
+def _flatten_alt(alt_node, source: bytes, result: list, parent_idx) -> None:
+    """Flatten statements from an elif/else/except/finally/for-else node.
+
+    All body statements are assigned the same *parent_idx* as the enclosing
+    compound statement (not the alt node itself).
+    """
+    body = alt_node.child_by_field_name("body")
+    if body is not None and body.type == "block":
+        _flatten_block(body, source, result, parent_idx)
+        return
+    # Fallback: find a block child directly
+    for child in alt_node.children:
+        if child.type == "block":
+            _flatten_block(child, source, result, parent_idx)
+            return
+
+
+def build_dependency_graph(code: str) -> DependencyGraph:
+    """Build a dependency graph for the first function in *code*.
+
+    Flattens **all** statements (top-level and nested inside compound blocks)
+    into a single ordered list.  Each statement receives a unique zero-based
+    index.
+
+    **Data-flow edges** (``graph.data``): for each pair (A, B) with A < B, if
+    statement B reads a variable written by statement A, edge ``A → B`` is
+    recorded.  Compound statement headers are processed header-only — their
+    body reads/writes are attributed to the body's own flat statement nodes.
+
+    **Control-flow edges** (``graph.control_flow``): for each compound
+    statement C at index *i*:
+
+    - ``C → j`` for every *j* whose ``parent_compound_idx == i`` (direct body
+      children depend on the compound header), and
+    - ``C → k`` for the first *k > i* at the same nesting level as C
+      (fall-through: the next sibling executes after C completes).
 
     Args:
         code: Source text of a Python function (or a module containing one).
 
     Returns:
-        Adjacency list ``dict[int, list[int]]`` where ``graph[A] = [B, C, ...]``
-        means statements B and C depend on variables written by A.  All
-        statement indices 0..n-1 appear as keys (empty list when no downstream
-        dependents exist).  Returns ``{}`` if *code* contains no function
-        definition or the function body has no statements.
+        A :class:`DependencyGraph`.  If *code* contains no function definition
+        or the function body has no statements, returns an empty graph with
+        ``num_statements == 0``.
     """
     source = code.encode("utf-8")
     _parser = Parser(_PY_LANGUAGE)
@@ -499,7 +619,7 @@ def build_dependency_graph(code: str) -> dict[int, list[int]]:
             break
 
     if func_node is None:
-        return {}
+        return DependencyGraph(data={}, control_flow={}, num_statements=0)
 
     block_node = None
     for child in func_node.children:
@@ -508,31 +628,44 @@ def build_dependency_graph(code: str) -> dict[int, list[int]]:
             break
 
     if block_node is None:
-        return {}
+        return DependencyGraph(data={}, control_flow={}, num_statements=0)
 
-    stmt_nodes = [
-        child for child in block_node.children
-        if child.is_named and child.type in _STATEMENT_TYPES
-    ]
+    flat = _flatten_stmts(block_node, source)
 
-    if not stmt_nodes:
-        return {}
+    if not flat:
+        return DependencyGraph(data={}, control_flow={}, num_statements=0)
 
-    num = len(stmt_nodes)
-    stmt_vars = [_get_stmt_writes_reads(s, source) for s in stmt_nodes]
+    num = len(flat)
+    stmt_vars = [_get_stmt_writes_reads(node, source) for node, _ in flat]
+    parent_of = [p for _, p in flat]
 
-    graph: dict[int, list[int]] = {i: [] for i in range(num)}
-
+    # Data-flow edges
+    data: dict[int, list[int]] = {i: [] for i in range(num)}
     for a in range(num):
         a_writes = stmt_vars[a][0]
         if not a_writes:
             continue
         for b in range(a + 1, num):
-            b_reads = stmt_vars[b][1]
-            if a_writes & b_reads:
-                graph[a].append(b)
+            if a_writes & stmt_vars[b][1]:
+                data[a].append(b)
 
-    return graph
+    # Control-flow edges
+    control_flow: dict[int, list[int]] = {i: [] for i in range(num)}
+    for i, (node, _) in enumerate(flat):
+        if node.type not in _COMPOUND_TYPES:
+            continue
+        # Edges to direct body children (every body stmt depends on its header)
+        for j in range(i + 1, num):
+            if parent_of[j] == i:
+                control_flow[i].append(j)
+        # Fall-through edge: first next sibling at the same nesting level
+        parent_i = parent_of[i]
+        for j in range(i + 1, num):
+            if parent_of[j] == parent_i:
+                control_flow[i].append(j)
+                break
+
+    return DependencyGraph(data=data, control_flow=control_flow, num_statements=num)
 
 
 class PythonParser(BaseParser):
