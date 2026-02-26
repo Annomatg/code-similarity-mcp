@@ -8,7 +8,7 @@ import pytest
 from code_similarity_mcp.parser.python import (
     PythonParser, count_statements, get_top_level_statements, build_dependency_graph,
 )
-from code_similarity_mcp.parser.base import DependencyGraph, MethodInfo, StatementInfo
+from code_similarity_mcp.parser.base import DependencyGraph, MethodInfo, StatementInfo, group_into_chunks
 from code_similarity_mcp.parser.registry import get_parser, SUPPORTED_EXTENSIONS
 
 
@@ -1386,3 +1386,320 @@ class TestControlFlowEdges:
         expected = list(range(g.num_statements))
         assert sorted(g.data.keys()) == expected
         assert sorted(g.control_flow.keys()) == expected
+
+
+# ---------------------------------------------------------------------------
+# group_into_chunks
+# ---------------------------------------------------------------------------
+
+class TestGroupIntoChunks:
+    """Tests for group_into_chunks.
+
+    The greedy algorithm:
+    - Starts a new chunk when the current statement has no intra-function
+      data-flow providers (a "fresh start" reading only params / external
+      names), provided the current chunk is already non-empty.
+    - Also starts a new chunk when the current statement depends on a
+      variable written in an already-closed chunk (unresolved cross-chunk
+      dependency).
+    - Otherwise, extends the current chunk.
+    """
+
+    # ------------------------------------------------------------------
+    # Edge cases / basic structure
+    # ------------------------------------------------------------------
+
+    def test_empty_graph_returns_empty_list(self):
+        g = DependencyGraph(data={}, control_flow={}, num_statements=0)
+        assert group_into_chunks(g) == []
+
+    def test_single_statement_one_chunk(self):
+        g = DependencyGraph(data={0: []}, control_flow={0: []}, num_statements=1)
+        assert group_into_chunks(g) == [[0]]
+
+    def test_returns_list_of_lists(self):
+        g = DependencyGraph(data={0: [1], 1: []}, control_flow={0: [], 1: []},
+                            num_statements=2)
+        chunks = group_into_chunks(g)
+        assert isinstance(chunks, list)
+        assert all(isinstance(c, list) for c in chunks)
+
+    # ------------------------------------------------------------------
+    # Partition correctness
+    # ------------------------------------------------------------------
+
+    def test_chunks_cover_all_statements(self):
+        """Union of all chunks is exactly range(num_statements)."""
+        code = textwrap.dedent("""\
+            def f(x, y):
+                a = x + 1
+                b = a * 2
+                c = y + 1
+                d = c * 2
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        all_stmts = [s for chunk in chunks for s in chunk]
+        assert sorted(all_stmts) == list(range(g.num_statements))
+
+    def test_chunks_are_non_overlapping(self):
+        """No statement index appears in more than one chunk."""
+        code = textwrap.dedent("""\
+            def f(x, y):
+                a = x + 1
+                b = a * 2
+                c = y + 1
+                d = c * 2
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        all_stmts = [s for chunk in chunks for s in chunk]
+        assert len(all_stmts) == len(set(all_stmts))
+
+    def test_each_chunk_is_non_empty(self):
+        code = textwrap.dedent("""\
+            def f(x, y):
+                a = x + 1
+                b = a * 2
+                c = y + 1
+                d = c * 2
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        assert all(len(c) > 0 for c in chunks)
+
+    def test_chunks_are_consecutive_ascending(self):
+        """Each chunk's indices are consecutive and ascending."""
+        code = textwrap.dedent("""\
+            def f(x, y):
+                a = x + 1
+                b = a * 2
+                c = y + 1
+                d = c * 2
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        for chunk in chunks:
+            assert chunk == list(range(chunk[0], chunk[-1] + 1))
+
+    # ------------------------------------------------------------------
+    # Sequential chain → one chunk
+    # ------------------------------------------------------------------
+
+    def test_sequential_chain_produces_one_chunk(self):
+        """a = f(); b = a+1; c = b+1 — fully connected chain → one chunk."""
+        # data[0]=[1], data[1]=[2], data[2]=[] — each stmt depends on predecessor
+        g = DependencyGraph(
+            data={0: [1], 1: [2], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = group_into_chunks(g)
+        assert chunks == [[0, 1, 2]]
+
+    def test_two_stmts_with_dependency_one_chunk(self):
+        """x = 1; y = x+1 → one chunk (y depends on x)."""
+        code = textwrap.dedent("""\
+            def f():
+                x = 1
+                y = x + 1
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        assert len(chunks) == 1
+        assert chunks[0] == [0, 1]
+
+    def test_long_chain_one_chunk(self):
+        code = textwrap.dedent("""\
+            def f(x):
+                a = x + 1
+                b = a + 1
+                c = b + 1
+                d = c + 1
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        assert len(chunks) == 1
+
+    # ------------------------------------------------------------------
+    # Independent computations → multiple chunks
+    # ------------------------------------------------------------------
+
+    def test_two_independent_chains_two_chunks(self):
+        """Two param-fed chains produce two separate chunks."""
+        # stmt 0: reads from params only (providers={})
+        # stmt 1: reads from stmt 0 (providers={0})
+        # stmt 2: reads from params only → fresh start → new chunk
+        # stmt 3: reads from stmt 2 (providers={2})
+        g = DependencyGraph(
+            data={0: [1], 1: [], 2: [3], 3: []},
+            control_flow={0: [], 1: [], 2: [], 3: []},
+            num_statements=4,
+        )
+        chunks = group_into_chunks(g)
+        assert chunks == [[0, 1], [2, 3]]
+
+    def test_real_code_two_independent_chains(self):
+        code = textwrap.dedent("""\
+            def process(x, y):
+                a = x + 1
+                b = a * 2
+                c = y + 1
+                d = c * 2
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        assert len(chunks) == 2
+
+    def test_all_statements_independent_each_own_chunk(self):
+        """No data-flow edges at all → every statement is its own chunk."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: []},
+            control_flow={0: [], 1: [], 2: []},
+            num_statements=3,
+        )
+        chunks = group_into_chunks(g)
+        assert chunks == [[0], [1], [2]]
+
+    def test_three_independent_param_reads_three_chunks(self):
+        code = textwrap.dedent("""\
+            def f(x, y, z):
+                a = x + 1
+                b = y + 1
+                c = z + 1
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        assert len(chunks) == 3
+
+    # ------------------------------------------------------------------
+    # Step 4: verify no unresolved inbound deps for clean-split functions
+    # ------------------------------------------------------------------
+
+    def _check_no_inbound_deps(self, graph: DependencyGraph,
+                                chunks: list[list[int]]) -> None:
+        """Assert that no chunk has a data-flow dependency on a prior chunk."""
+        prior: set[int] = set()
+        for chunk in chunks:
+            chunk_set = set(chunk)
+            for stmt in chunk:
+                for producer, consumers in graph.data.items():
+                    if stmt in consumers and producer in prior:
+                        raise AssertionError(
+                            f"Stmt {stmt} in chunk {chunk} has inbound dep "
+                            f"from prior stmt {producer}"
+                        )
+            prior.update(chunk_set)
+
+    def test_step4_single_chain_no_inbound_deps(self):
+        code = textwrap.dedent("""\
+            def f(x):
+                a = x + 1
+                b = a * 2
+                c = b - 1
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        self._check_no_inbound_deps(g, chunks)
+
+    def test_step4_two_independent_chains_no_inbound_deps(self):
+        code = textwrap.dedent("""\
+            def process(x, y):
+                a = x + 1
+                b = a * 2
+                c = y + 1
+                d = c * 2
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        self._check_no_inbound_deps(g, chunks)
+
+    def test_step4_three_independent_chains_no_inbound_deps(self):
+        code = textwrap.dedent("""\
+            def f(x, y, z):
+                a = x * 2
+                b = a + 1
+                c = y * 2
+                d = c + 1
+                e = z * 2
+                f = e + 1
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        self._check_no_inbound_deps(g, chunks)
+        assert len(chunks) == 3
+
+    def test_step4_no_data_flow_no_inbound_deps(self):
+        """All-independent statements produce solo chunks, all clean."""
+        g = DependencyGraph(
+            data={0: [], 1: [], 2: [], 3: []},
+            control_flow={0: [], 1: [], 2: [], 3: []},
+            num_statements=4,
+        )
+        chunks = group_into_chunks(g)
+        self._check_no_inbound_deps(g, chunks)
+
+    # ------------------------------------------------------------------
+    # Forced split on closed-chunk dependency
+    # ------------------------------------------------------------------
+
+    def test_forced_split_on_closed_chunk_dependency(self):
+        """When stmt i reads from an already-closed chunk, a new chunk starts."""
+        # Chunks: [[0, 1], [2], ...] and stmt 3 depends on stmt 0 (closed).
+        # data: 0→[1], 2→[], 0→[3] as well.  Build that graph manually.
+        g = DependencyGraph(
+            data={0: [1, 3], 1: [], 2: [], 3: []},
+            control_flow={0: [], 1: [], 2: [], 3: []},
+            num_statements=4,
+        )
+        # Expected walk:
+        # i=0: providers={}, current empty → [0]
+        # i=1: providers={0}, extend → [0, 1]
+        # i=2: providers={}, fresh start → split → [[0,1]], current=[2]
+        # i=3: providers={0}, 0 is closed → split → [[0,1],[2]], current=[3]
+        chunks = group_into_chunks(g)
+        assert [0, 1] in chunks
+        assert [2] in chunks
+        assert [3] in chunks
+
+    # ------------------------------------------------------------------
+    # Real function with compound statements
+    # ------------------------------------------------------------------
+
+    def test_for_loop_function_single_chunk(self):
+        """A for loop and its body share data flow — stay in one chunk."""
+        code = textwrap.dedent("""\
+            def total(items):
+                result = 0
+                for item in items:
+                    result += item
+                return result
+        """)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g)
+        # All statements connected via result / item → one chunk
+        all_stmts = [s for c in chunks for s in c]
+        assert sorted(all_stmts) == list(range(g.num_statements))
+
+    def test_first_stmt_always_starts_first_chunk(self):
+        """Statement 0 is always the first element of the first chunk."""
+        for code in [
+            "def f(x):\n    a = x + 1\n",
+            "def f():\n    pass\n",
+            "def f(x, y):\n    a = x\n    b = y\n",
+        ]:
+            g = build_dependency_graph(code)
+            chunks = group_into_chunks(g)
+            assert chunks[0][0] == 0
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def test_importable_from_package(self):
+        from code_similarity_mcp.parser import group_into_chunks as gic
+        assert callable(gic)
+
+    def test_importable_from_base(self):
+        from code_similarity_mcp.parser.base import group_into_chunks as gic
+        assert callable(gic)

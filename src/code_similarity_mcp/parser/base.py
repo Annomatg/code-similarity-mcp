@@ -66,6 +66,70 @@ class DependencyGraph:
     num_statements: int
 
 
+def group_into_chunks(graph: "DependencyGraph") -> list[list[int]]:
+    """Group statements into self-consistent chunks using a greedy heuristic.
+
+    Processes statements in order.  A new chunk begins whenever:
+
+    1. The next statement has **no** intra-function data-flow providers (all of
+       its reads come from parameters or external variables), signalling a
+       natural "fresh start" for an independent computation — provided the
+       current chunk is already non-empty; or
+    2. The next statement reads a variable written by a statement in an
+       already-closed chunk (an *unresolved* cross-chunk dependency that cannot
+       be fixed by further extension).
+
+    A chunk is *self-consistent* when every variable read by statements inside
+    the chunk is either written by an earlier statement in the same chunk or
+    comes from outside the function (parameters / module-level names).
+
+    Args:
+        graph: A :class:`DependencyGraph` built by
+            :func:`~code_similarity_mcp.parser.python.build_dependency_graph`.
+
+    Returns:
+        A list of chunks.  Each chunk is a non-empty list of consecutive
+        statement indices in ascending order.  Together the chunks form a
+        partition of ``range(graph.num_statements)``.  Returns an empty list
+        when ``graph.num_statements == 0``.
+    """
+    if graph.num_statements == 0:
+        return []
+
+    # Build reverse index: providers[i] = {j : i in graph.data[j]}
+    # providers[i] is the set of statements whose writes are read by statement i.
+    providers: dict[int, set[int]] = {i: set() for i in range(graph.num_statements)}
+    for j, consumers in graph.data.items():
+        for i in consumers:
+            providers[i].add(j)
+
+    chunks: list[list[int]] = []
+    current_chunk: list[int] = []
+    closed_statements: set[int] = set()
+
+    for i in range(graph.num_statements):
+        # Rule 1: i depends on something in an already-closed chunk.
+        has_closed_dep = any(j in closed_statements for j in providers[i])
+
+        # Rule 2: i has no intra-function providers at all — a "fresh start"
+        # that begins an independent computation.  Only split if the current
+        # chunk already contains something (the very first statement always
+        # goes into the first chunk regardless).
+        is_fresh_start = len(providers[i]) == 0
+
+        if has_closed_dep or (is_fresh_start and len(current_chunk) > 0):
+            chunks.append(current_chunk)
+            closed_statements.update(current_chunk)
+            current_chunk = [i]
+        else:
+            current_chunk.append(i)
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
 class BaseParser(ABC):
     """Abstract parser for a specific language."""
 
