@@ -19,6 +19,7 @@ from code_similarity_mcp.parser.python import (
     get_flat_statements,
 )
 from code_similarity_mcp.parser.registry import SUPPORTED_EXTENSIONS, get_parser
+from code_similarity_mcp.similarity.chunk_scorer import ChunkSimilarityScorer
 from code_similarity_mcp.similarity.filter import FilterPipeline
 from code_similarity_mcp.similarity.scorer import SimilarityScorer
 
@@ -44,6 +45,7 @@ app = FastMCP("code-similarity-mcp")
 _generator = EmbeddingGenerator()
 _scorer = SimilarityScorer()
 _filter = FilterPipeline()
+_chunk_scorer = ChunkSimilarityScorer()
 
 _DEFAULT_INDEX_DIR = Path.home() / ".code-similarity-mcp" / "index"
 
@@ -585,32 +587,42 @@ def analyze_chunks(
             registry.close()
             return json.dumps({"error": f"Embedding not found for chunk id {chunk_id}"})
         exclude_id = chunk_id
+        # Build query info from the stored chunk (full topology available).
+        query_info: dict = {
+            "stmt_count": len(chunk["statement_indices"]),
+            "depends_on_chunks": chunk["depends_on_chunks"],
+            "depended_on_by_chunks": chunk["depended_on_by_chunks"],
+        }
     else:
         # Wrap snippet in a dummy function so the normalizer can process it.
         indented = "\n".join(f"    {line}" for line in code_snippet.splitlines())
         wrapped = f"def _chunk_func():\n{indented}\n"
         normalized = normalize_code(wrapped, "python")
         embedding = _generator.encode_one(normalized)
+        # For a raw snippet, only statement count is available (no chunk context).
+        query_info = {"stmt_count": count_statements(code_snippet)}
 
     # Fetch enough candidates to account for self-exclusion.
     fetch_k = top_k + 1 if exclude_id is not None else top_k
     raw = registry.search_chunks(embedding, top_k=fetch_k)
 
-    output: list[dict] = []
+    # Score every candidate with the combined scorer, then sort and trim.
+    scored: list[dict] = []
     for r in raw:
         if r["id"] == exclude_id:
             continue
-        if len(output) >= top_k:
-            break
-        score = r["embedding_score"]
-        output.append({
+        combined = _chunk_scorer.score(r["embedding_score"], query_info, r)
+        scored.append({
             "chunk_id": r["id"],
             "function_name": r["function_name"],
             "file": r["file_path"],
-            "similarity_score": round(score, 4),
+            "similarity_score": round(combined, 4),
             "statement_range": [r["statement_start"], r["statement_end"]],
-            "refactoring_hint": _refactoring_hint(score),
+            "refactoring_hint": _refactoring_hint(combined),
         })
+
+    scored.sort(key=lambda x: x["similarity_score"], reverse=True)
+    output = scored[:top_k]
 
     registry.close()
     log.info("analyze_chunks done: %d results returned", len(output))

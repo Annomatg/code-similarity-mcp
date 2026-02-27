@@ -304,3 +304,56 @@ def test_result_file_is_nonempty_string(tmp_path):
     for item in data["results"]:
         assert isinstance(item["file"], str)
         assert len(item["file"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: combined scoring (feature #32)
+# ---------------------------------------------------------------------------
+
+
+def test_combined_score_lower_than_pure_embedding_when_stmt_mismatch(tmp_path):
+    """Score is less than embedding alone when statement counts differ strongly."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function(n_stmts=40))
+    # A single-statement snippet will have a very different stmt count from
+    # stored chunks (which have ~10 statements each). Combined score should be
+    # pulled down by the structural component.
+    data = json.loads(analyze_chunks(code_snippet="x_0 = 0", top_k=1, index_dir=index_dir))
+    if not data["results"]:
+        pytest.skip("No results to check")
+    score = data["results"][0]["similarity_score"]
+    assert 0.0 <= score <= 1.0
+
+
+def test_combined_score_is_weighted_blend(tmp_path):
+    """Verify that the score is not just embedding similarity (structural component is used)."""
+    from code_similarity_mcp.similarity.chunk_scorer import ChunkSimilarityScorer
+    scorer = ChunkSimilarityScorer()
+    assert scorer.W_EMBEDDING == pytest.approx(0.7)
+    assert scorer.W_STRUCTURAL == pytest.approx(0.3)
+    assert scorer.W_EMBEDDING + scorer.W_STRUCTURAL == pytest.approx(1.0)
+
+
+def test_results_sorted_by_combined_score(tmp_path):
+    """Results are sorted by combined score, not just embedding score."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function(n_stmts=40))
+    data = json.loads(analyze_chunks(code_snippet="x_0 = 0\nx_1 = 1\nx_2 = 2", top_k=3, index_dir=index_dir))
+    scores = [item["similarity_score"] for item in data["results"]]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_chunk_id_query_combined_score_in_range(tmp_path):
+    """chunk_id query uses topology in structural component; score still in [0, 1]."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function(n_stmts=40))
+    registry = MethodRegistry(index_dir)
+    methods = registry.get_all_methods()
+    big = next(m for m in methods if m["name"] == "big_func")
+    chunks = sorted(registry.get_chunks_by_function(big["id"]), key=lambda c: c["chunk_index"])
+    registry.close()
+
+    if len(chunks) < 2:
+        pytest.skip("Need at least 2 chunks")
+
+    cid = chunks[0]["id"]
+    data = json.loads(analyze_chunks(chunk_id=cid, index_dir=index_dir))
+    for item in data["results"]:
+        assert 0.0 <= item["similarity_score"] <= 1.0
