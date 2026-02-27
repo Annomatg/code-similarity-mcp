@@ -440,6 +440,34 @@ class MethodRegistry:
         self._save_chunk_index()
         return chunk_db_id
 
+    def delete_chunk_by_id(self, chunk_id: int) -> bool:
+        """Remove a single chunk by its DB id.
+
+        Removes the entry from *_chunk_id_map* and persists the updated chunk
+        FAISS index to disk.  The FAISS vector at the former position remains
+        in the index (FAISS does not support in-place deletion) but the orphaned
+        position is no longer reachable via *_chunk_id_map*, so it will never
+        appear in search results.
+
+        Returns:
+            ``True`` if the chunk existed and was removed; ``False`` otherwise.
+        """
+        cur = self._conn.execute(
+            "SELECT faiss_pos FROM chunks WHERE id=?", (chunk_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+
+        faiss_pos = row[0]
+        self._conn.execute("DELETE FROM chunks WHERE id=?", (chunk_id,))
+        self._conn.commit()
+
+        if faiss_pos is not None:
+            self._chunk_id_map.pop(faiss_pos, None)
+        self._save_chunk_index()
+        return True
+
     def delete_chunks_by_function(self, function_id: int) -> int:
         """Remove all chunks for a function. Returns count removed."""
         cur = self._conn.execute(
