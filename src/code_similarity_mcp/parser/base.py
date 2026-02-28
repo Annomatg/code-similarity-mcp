@@ -159,6 +159,8 @@ class ChunkInfo:
             read by a statement in this chunk).
         depended_on_by_chunks: Sorted list of chunk indices that read from this
             chunk (inverse of ``depends_on_chunks``).
+        code_hash: SHA-256 hex digest of the chunk's normalized source text.
+            Populated by :func:`embed_chunks`; empty string until then.
     """
 
     chunk_index: int
@@ -170,6 +172,7 @@ class ChunkInfo:
     function_id: Optional[int]
     depends_on_chunks: list
     depended_on_by_chunks: list
+    code_hash: str = ""
 
 
 def annotate_chunks(
@@ -335,6 +338,11 @@ def embed_chunks(
         wrapped = "def _chunk_func():\n" + indented
 
         texts.append(normalizer.normalize(wrapped))
+
+    # Populate code_hash on each ChunkInfo from its normalized text so the
+    # hash is available without a database round-trip (feature #34).
+    for chunk, text in zip(chunks, texts):
+        chunk.code_hash = hashlib.sha256(text.encode()).hexdigest()
 
     import numpy as np  # noqa: F401 — ensure numpy is available for callers
     embeddings = list(generator.encode(texts))
