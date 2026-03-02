@@ -32,7 +32,29 @@ It communicates over **stdio** (no HTTP port needed).
 
 ---
 
-## Global Configuration
+## Automated Install (Recommended)
+
+Run the helper script that ships with the repo.  It detects the repo root
+automatically, merges the MCP entry into `~/.claude.json` without clobbering
+any other entries, and creates the file if it does not exist yet.
+
+**Windows (PowerShell)**
+
+```powershell
+.\scripts\install-global.ps1
+```
+
+**Linux / macOS (Bash)**
+
+```bash
+bash scripts/install-global.sh
+```
+
+Then skip to [Verifying the Installation](#verifying-the-installation).
+
+---
+
+## Manual Global Configuration
 
 Edit `~/.claude.json` (Linux/macOS) or `%USERPROFILE%\.claude.json` (Windows) and add an `mcpServers` entry. If the file does not exist, create it.
 
