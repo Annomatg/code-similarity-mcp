@@ -397,7 +397,7 @@ _CHUNK_MIN_STATEMENTS = 30  # functions with more than this many statements are 
 def chunk_repository(
     repository_root: str,
     index_dir: str | None = None,
-    max_statements_per_chunk: int = 10,
+    max_statements_per_chunk: int = 20,
     force_rechunk: bool = False,
 ) -> str:
     """
@@ -417,7 +417,7 @@ def chunk_repository(
             which indexed functions to process.
         index_dir: Index directory (default: ~/.code-similarity-mcp/index).
         max_statements_per_chunk: Hard cap on the number of statements per
-            chunk (default: 10).
+            chunk (default: 20).
         force_rechunk: If true, re-chunk functions even if chunks are already
             stored (replaces existing chunks). Default: false.
 

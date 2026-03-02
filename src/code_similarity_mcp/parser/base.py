@@ -68,7 +68,7 @@ class DependencyGraph:
 
 def group_into_chunks(
     graph: "DependencyGraph",
-    max_statements_per_chunk: int = 10,
+    max_statements_per_chunk: int = 20,
 ) -> list[list[int]]:
     """Group statements into self-consistent chunks using a greedy heuristic.
 
@@ -94,7 +94,7 @@ def group_into_chunks(
         max_statements_per_chunk: Maximum number of statements allowed in a
             single chunk.  When the current chunk reaches this size the chunk
             is closed and a new one is started, regardless of dependency state.
-            Must be a positive integer.  Defaults to ``10``.
+            Must be a positive integer.  Defaults to ``20``.
 
     Returns:
         A list of chunks.  Each chunk is a non-empty list of consecutive

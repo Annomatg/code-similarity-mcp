@@ -1715,27 +1715,27 @@ class TestGroupIntoChunks:
     # max_statements_per_chunk (feature #22)
     # ------------------------------------------------------------------
 
-    def test_default_max_is_ten(self):
-        """A chain of exactly 10 statements stays in one chunk by default."""
-        # 10-statement chain: 0→1→2→…→9
-        data = {i: [i + 1] for i in range(9)}
-        data[9] = []
-        g = DependencyGraph(data=data, control_flow={i: [] for i in range(10)},
-                            num_statements=10)
+    def test_default_max_is_twenty(self):
+        """A chain of exactly 20 statements stays in one chunk by default."""
+        # 20-statement chain: 0→1→2→…→19
+        data = {i: [i + 1] for i in range(19)}
+        data[19] = []
+        g = DependencyGraph(data=data, control_flow={i: [] for i in range(20)},
+                            num_statements=20)
         chunks = group_into_chunks(g)
-        assert chunks == [list(range(10))]
+        assert chunks == [list(range(20))]
 
-    def test_default_max_splits_eleven_statement_chain(self):
-        """A chain of 11 interdependent statements must be split (default max=10)."""
-        data = {i: [i + 1] for i in range(10)}
-        data[10] = []
-        g = DependencyGraph(data=data, control_flow={i: [] for i in range(11)},
-                            num_statements=11)
+    def test_default_max_splits_twentyone_statement_chain(self):
+        """A chain of 21 interdependent statements must be split (default max=20)."""
+        data = {i: [i + 1] for i in range(20)}
+        data[20] = []
+        g = DependencyGraph(data=data, control_flow={i: [] for i in range(21)},
+                            num_statements=21)
         chunks = group_into_chunks(g)
-        assert all(len(c) <= 10 for c in chunks)
+        assert all(len(c) <= 20 for c in chunks)
         # Verify full partition
         all_stmts = [s for c in chunks for s in c]
-        assert sorted(all_stmts) == list(range(11))
+        assert sorted(all_stmts) == list(range(21))
 
     def test_no_chunk_exceeds_max(self):
         """No output chunk ever exceeds max_statements_per_chunk."""
