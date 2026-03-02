@@ -64,6 +64,7 @@ Edit `~/.claude.json` (Linux/macOS) or `%USERPROFILE%\.claude.json` (Windows) an
 {
   "mcpServers": {
     "code-similarity": {
+	  "type": "stdio",
       "command": "/path/to/code-similarity-mcp/.venv/bin/python",
       "args": ["-m", "code_similarity_mcp"],
       "cwd": "/path/to/code-similarity-mcp"
@@ -78,6 +79,7 @@ Edit `~/.claude.json` (Linux/macOS) or `%USERPROFILE%\.claude.json` (Windows) an
 {
   "mcpServers": {
     "code-similarity": {
+	  "type": "stdio",
       "command": "/home/alice/dev/code-similarity-mcp/.venv/bin/python",
       "args": ["-m", "code_similarity_mcp"],
       "cwd": "/home/alice/dev/code-similarity-mcp"
@@ -92,6 +94,7 @@ Edit `~/.claude.json` (Linux/macOS) or `%USERPROFILE%\.claude.json` (Windows) an
 {
   "mcpServers": {
     "code-similarity": {
+	  "type": "stdio",
       "command": "C:\\path\\to\\code-similarity-mcp\\.venv\\Scripts\\python.exe",
       "args": ["-m", "code_similarity_mcp"],
       "cwd": "C:\\path\\to\\code-similarity-mcp"
@@ -106,6 +109,7 @@ Edit `~/.claude.json` (Linux/macOS) or `%USERPROFILE%\.claude.json` (Windows) an
 {
   "mcpServers": {
     "code-similarity": {
+	  "type": "stdio",
       "command": "C:\\Dev\\code-similarity-mcp\\.venv\\Scripts\\python.exe",
       "args": ["-m", "code_similarity_mcp"],
       "cwd": "C:\\Dev\\code-similarity-mcp"
@@ -155,7 +159,8 @@ If `~/.claude.json` already has content, add the new server inside the existing 
   "mcpServers": {
     "some-other-server": { "..." : "..." },
     "code-similarity": {
-      "command": "/path/to/.venv/bin/python",
+      "type": "stdio",
+	  "command": "/path/to/.venv/bin/python",
       "args": ["-m", "code_similarity_mcp"],
       "cwd": "/path/to/code-similarity-mcp"
     }
