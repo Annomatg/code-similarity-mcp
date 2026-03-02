@@ -1538,7 +1538,8 @@ class TestGroupIntoChunks:
             control_flow={0: [], 1: [], 2: [], 3: []},
             num_statements=4,
         )
-        chunks = group_into_chunks(g)
+        # Use max=3 (< 4 stmts) so the single-chunk short-circuit doesn't fire.
+        chunks = group_into_chunks(g, max_statements_per_chunk=3)
         assert chunks == [[0, 1], [2, 3]]
 
     def test_real_code_two_independent_chains(self):
@@ -1550,17 +1551,19 @@ class TestGroupIntoChunks:
                 d = c * 2
         """)
         g = build_dependency_graph(code)
-        chunks = group_into_chunks(g)
+        # 4 statements — use max=3 so fresh-start splitting is exercised.
+        chunks = group_into_chunks(g, max_statements_per_chunk=3)
         assert len(chunks) == 2
 
     def test_all_statements_independent_each_own_chunk(self):
-        """No data-flow edges at all → every statement is its own chunk."""
+        """No data-flow edges at all → every statement is its own chunk when max < num."""
         g = DependencyGraph(
             data={0: [], 1: [], 2: []},
             control_flow={0: [], 1: [], 2: []},
             num_statements=3,
         )
-        chunks = group_into_chunks(g)
+        # Use max=2 (< 3 stmts) so the single-chunk short-circuit doesn't fire.
+        chunks = group_into_chunks(g, max_statements_per_chunk=2)
         assert chunks == [[0], [1], [2]]
 
     def test_three_independent_param_reads_three_chunks(self):
@@ -1571,7 +1574,8 @@ class TestGroupIntoChunks:
                 c = z + 1
         """)
         g = build_dependency_graph(code)
-        chunks = group_into_chunks(g)
+        # 3 statements — use max=2 so fresh-start splitting is exercised.
+        chunks = group_into_chunks(g, max_statements_per_chunk=2)
         assert len(chunks) == 3
 
     # ------------------------------------------------------------------
@@ -1627,7 +1631,8 @@ class TestGroupIntoChunks:
                 f = e + 1
         """)
         g = build_dependency_graph(code)
-        chunks = group_into_chunks(g)
+        # 6 statements — use max=5 so fresh-start splitting is exercised.
+        chunks = group_into_chunks(g, max_statements_per_chunk=5)
         self._check_no_inbound_deps(g, chunks)
         assert len(chunks) == 3
 
@@ -1654,12 +1659,12 @@ class TestGroupIntoChunks:
             control_flow={0: [], 1: [], 2: [], 3: []},
             num_statements=4,
         )
-        # Expected walk:
+        # Expected walk with max=3 (< 4 stmts, so no single-chunk short-circuit):
         # i=0: providers={}, current empty → [0]
         # i=1: providers={0}, extend → [0, 1]
         # i=2: providers={}, fresh start → split → [[0,1]], current=[2]
         # i=3: providers={0}, 0 is closed → split → [[0,1],[2]], current=[3]
-        chunks = group_into_chunks(g)
+        chunks = group_into_chunks(g, max_statements_per_chunk=3)
         assert [0, 1] in chunks
         assert [2] in chunks
         assert [3] in chunks
@@ -1804,6 +1809,99 @@ class TestGroupIntoChunks:
         """A single statement always fits in one chunk regardless of max."""
         g = DependencyGraph(data={0: []}, control_flow={0: []}, num_statements=1)
         assert group_into_chunks(g, max_statements_per_chunk=1) == [[0]]
+
+    # ------------------------------------------------------------------
+    # Feature #38: function shorter than max_chunk_size → single chunk
+    # ------------------------------------------------------------------
+
+    def test_max_larger_than_count_independent_stmts_single_chunk(self):
+        """35 fully independent statements with max=50 → one chunk covering all 35."""
+        n = 35
+        # All statements are independent (no intra-function providers).
+        data = {i: [] for i in range(n)}
+        g = DependencyGraph(
+            data=data,
+            control_flow={i: [] for i in range(n)},
+            num_statements=n,
+        )
+        chunks = group_into_chunks(g, max_statements_per_chunk=50)
+        assert len(chunks) == 1
+        assert chunks[0] == list(range(n))
+
+    def test_max_equal_to_count_independent_stmts_single_chunk(self):
+        """35 independent statements with max=35 (exact) → one chunk."""
+        n = 35
+        data = {i: [] for i in range(n)}
+        g = DependencyGraph(
+            data=data,
+            control_flow={i: [] for i in range(n)},
+            num_statements=n,
+        )
+        chunks = group_into_chunks(g, max_statements_per_chunk=35)
+        assert len(chunks) == 1
+        assert chunks[0] == list(range(n))
+
+    def test_max_one_less_than_count_independent_stmts_splits(self):
+        """35 independent statements with max=34 → must split into multiple chunks."""
+        n = 35
+        data = {i: [] for i in range(n)}
+        g = DependencyGraph(
+            data=data,
+            control_flow={i: [] for i in range(n)},
+            num_statements=n,
+        )
+        chunks = group_into_chunks(g, max_statements_per_chunk=34)
+        # Should have more than one chunk since max < total
+        assert len(chunks) > 1
+        # Full partition still holds
+        all_stmts = [s for c in chunks for s in c]
+        assert sorted(all_stmts) == list(range(n))
+
+    def test_max_larger_than_count_single_chunk_annotated_no_cross_deps(self):
+        """35 statements with max=50 → single ChunkInfo with empty dependency lists."""
+        n = 35
+        data = {i: [] for i in range(n)}
+        g = DependencyGraph(
+            data=data,
+            control_flow={i: [] for i in range(n)},
+            num_statements=n,
+        )
+        chunks = group_into_chunks(g, max_statements_per_chunk=50)
+        result = annotate_chunks(chunks, g, function_name="big_func", file_path="x.py")
+        assert len(result) == 1
+        ci = result[0]
+        assert ci.depends_on_chunks == []
+        assert ci.depended_on_by_chunks == []
+        assert ci.statement_start == 0
+        assert ci.statement_end == n - 1
+        assert ci.statement_indices == list(range(n))
+
+    def test_real_35_stmt_function_max_50_one_chunk(self):
+        """Integration: real Python code with 35 statements, max=50 → one chunk."""
+        # Build a function with 35 independent assignments
+        lines = ["def big_func(a, b, c, d, e):"]
+        for i in range(35):
+            lines.append(f"    v{i} = {i} + 1")
+        code = "\n".join(lines)
+        g = build_dependency_graph(code)
+        assert g.num_statements == 35
+        chunks = group_into_chunks(g, max_statements_per_chunk=50)
+        assert len(chunks) == 1
+        assert chunks[0] == list(range(35))
+
+    def test_real_35_stmt_function_max_50_annotated_no_cross_deps(self):
+        """Integration: annotated single chunk has no cross-chunk dependency links."""
+        lines = ["def big_func(a, b, c, d, e):"]
+        for i in range(35):
+            lines.append(f"    v{i} = {i} + 1")
+        code = "\n".join(lines)
+        g = build_dependency_graph(code)
+        chunks = group_into_chunks(g, max_statements_per_chunk=50)
+        result = annotate_chunks(chunks, g, function_name="big_func", file_path="x.py")
+        assert len(result) == 1
+        ci = result[0]
+        assert ci.depends_on_chunks == []
+        assert ci.depended_on_by_chunks == []
 
 
 # ---------------------------------------------------------------------------
@@ -2080,7 +2178,8 @@ class TestAnnotateChunks:
                 d = c * 2
         """)
         g = build_dependency_graph(code)
-        chunks = group_into_chunks(g)
+        # 4 statements — use max=3 so fresh-start splitting is exercised.
+        chunks = group_into_chunks(g, max_statements_per_chunk=3)
         result = annotate_chunks(chunks, g, function_name="process", file_path="mod.py")
         assert len(result) == 2
         for ci in result:
@@ -2099,7 +2198,8 @@ class TestAnnotateChunks:
             control_flow={0: [], 1: [], 2: [], 3: []},
             num_statements=4,
         )
-        chunks = group_into_chunks(g)
+        # Use max=3 (< 4 stmts) so the single-chunk short-circuit doesn't fire.
+        chunks = group_into_chunks(g, max_statements_per_chunk=3)
         result = annotate_chunks(chunks, g)
         # Locate the chunk containing stmt 3 and chunk containing stmt 0
         chunk_of = {idx: ci.chunk_index for ci in result for idx in ci.statement_indices}

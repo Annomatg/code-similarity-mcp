@@ -105,6 +105,11 @@ def group_into_chunks(
     if graph.num_statements == 0:
         return []
 
+    # Short-circuit: if the cap is at least as large as the total statement
+    # count, the entire function fits in a single chunk — no splitting needed.
+    if max_statements_per_chunk >= graph.num_statements:
+        return [list(range(graph.num_statements))]
+
     # Build reverse index: providers[i] = {j : i in graph.data[j]}
     # providers[i] is the set of statements whose writes are read by statement i.
     providers: dict[int, set[int]] = {i: set() for i in range(graph.num_statements)}
