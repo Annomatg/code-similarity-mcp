@@ -422,7 +422,7 @@ def chunk_repository(
             stored (replaces existing chunks). Default: false.
 
     Returns:
-        JSON summary: { files_scanned, functions_chunked, chunks_created }
+        JSON summary: { files_scanned, functions_chunked, chunks_created, skipped_files }
     """
     log.info(
         "chunk_repository called: root=%s index_dir=%s max_stmts=%d",
@@ -448,6 +448,7 @@ def chunk_repository(
     files_scanned = len({m["file_path"] for m in repo_methods})
     functions_chunked = 0
     chunks_created = 0
+    files_with_errors: set[str] = set()
 
     for method in repo_methods:
         if count_statements(method["body_code"]) <= _CHUNK_MIN_STATEMENTS:
@@ -506,12 +507,14 @@ def chunk_repository(
                 method["file_path"],
                 traceback.format_exc(),
             )
+            files_with_errors.add(method["file_path"])
 
     registry.close()
     result = {
         "files_scanned": files_scanned,
         "functions_chunked": functions_chunked,
         "chunks_created": chunks_created,
+        "skipped_files": sorted(files_with_errors),
     }
     log.info("chunk_repository done: %s", result)
     return json.dumps(result)

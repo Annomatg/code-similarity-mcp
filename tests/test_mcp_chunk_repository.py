@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -54,7 +55,7 @@ def test_returns_valid_json(tmp_path):
 def test_response_has_required_keys(tmp_path):
     repo, index_dir = _setup_index(tmp_path, _make_small_function())
     data = json.loads(chunk_repository(repo, index_dir=index_dir))
-    for key in ("files_scanned", "functions_chunked", "chunks_created"):
+    for key in ("files_scanned", "functions_chunked", "chunks_created", "skipped_files"):
         assert key in data, f"Missing key: {key!r}"
 
 
@@ -569,7 +570,7 @@ def test_no_large_functions_returns_valid_summary(tmp_path):
     """Step 1+2: all functions ≤30 stmts → valid summary with zero chunking counts."""
     repo, index_dir = _setup_index(tmp_path, _make_small_function())
     data = json.loads(chunk_repository(repo, index_dir=index_dir))
-    assert data == {"files_scanned": 1, "functions_chunked": 0, "chunks_created": 0}
+    assert data == {"files_scanned": 1, "functions_chunked": 0, "chunks_created": 0, "skipped_files": []}
 
 
 def test_no_large_functions_no_exception_raised(tmp_path):
@@ -623,7 +624,7 @@ def test_empty_index_returns_zero_summary(tmp_path):
     index_dir = str(tmp_path / "index")
     # Do NOT call index_repository — the index is empty.
     data = json.loads(chunk_repository(str(repo), index_dir=index_dir))
-    assert data == {"files_scanned": 0, "functions_chunked": 0, "chunks_created": 0}
+    assert data == {"files_scanned": 0, "functions_chunked": 0, "chunks_created": 0, "skipped_files": []}
 
 
 def test_empty_index_no_exception(tmp_path):
@@ -633,3 +634,138 @@ def test_empty_index_no_exception(tmp_path):
     index_dir = str(tmp_path / "index")
     result = chunk_repository(str(repo), index_dir=index_dir)
     assert "error" not in json.loads(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests: feature #36 — malformed Python file is skipped gracefully
+# ---------------------------------------------------------------------------
+
+
+_MALFORMED_PYTHON = "def broken(\n    x =\n"  # invalid syntax
+
+
+def test_malformed_file_in_repo_does_not_raise(tmp_path):
+    """A malformed .py file alongside valid ones must not cause chunk_repository to raise."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "valid.py").write_text(_make_large_function("valid_func", n_stmts=35), encoding="utf-8")
+    (repo / "broken.py").write_text(_MALFORMED_PYTHON, encoding="utf-8")
+    index_dir = str(tmp_path / "index")
+    # index_repository already skips the malformed file silently.
+    index_repository(str(repo), index_dir=index_dir)
+    # chunk_repository must complete without raising even if broken.py is present.
+    result = chunk_repository(str(repo), index_dir=index_dir)
+    data = json.loads(result)
+    assert "error" not in data
+
+
+def test_malformed_file_valid_functions_still_chunked(tmp_path):
+    """Valid large functions are chunked even when the repo contains a malformed file."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "valid.py").write_text(_make_large_function("valid_func", n_stmts=35), encoding="utf-8")
+    (repo / "broken.py").write_text(_MALFORMED_PYTHON, encoding="utf-8")
+    index_dir = str(tmp_path / "index")
+    index_repository(str(repo), index_dir=index_dir)
+    data = json.loads(chunk_repository(str(repo), index_dir=index_dir))
+    assert data["functions_chunked"] == 1
+    assert data["chunks_created"] >= 1
+
+
+def test_skipped_files_empty_when_all_succeed(tmp_path):
+    """skipped_files must be an empty list when no function raises during chunking."""
+    repo, index_dir = _setup_index(tmp_path, _make_large_function(n_stmts=35))
+    data = json.loads(chunk_repository(repo, index_dir=index_dir))
+    assert data["skipped_files"] == []
+
+
+def test_chunking_failure_reported_in_skipped_files(tmp_path):
+    """When build_dependency_graph raises, the function's file appears in skipped_files."""
+    repo, index_dir = _setup_index(tmp_path, _make_large_function(n_stmts=35))
+    with patch(
+        "code_similarity_mcp.mcp.server.build_dependency_graph",
+        side_effect=SyntaxError("simulated parse failure"),
+    ):
+        data = json.loads(chunk_repository(repo, index_dir=index_dir))
+    assert len(data["skipped_files"]) == 1
+    assert data["skipped_files"][0].endswith("module.py")
+
+
+def test_chunking_failure_no_exception_raised(tmp_path):
+    """chunk_repository must not propagate exceptions from build_dependency_graph."""
+    repo, index_dir = _setup_index(tmp_path, _make_large_function(n_stmts=35))
+    with patch(
+        "code_similarity_mcp.mcp.server.build_dependency_graph",
+        side_effect=RuntimeError("unexpected failure"),
+    ):
+        result = chunk_repository(repo, index_dir=index_dir)
+    # Must return valid JSON with no top-level 'error' key.
+    data = json.loads(result)
+    assert "error" not in data
+
+
+def test_chunking_failure_zero_functions_chunked(tmp_path):
+    """When every function fails during chunking, functions_chunked is 0."""
+    repo, index_dir = _setup_index(tmp_path, _make_large_function(n_stmts=35))
+    with patch(
+        "code_similarity_mcp.mcp.server.build_dependency_graph",
+        side_effect=ValueError("bad graph"),
+    ):
+        data = json.loads(chunk_repository(repo, index_dir=index_dir))
+    assert data["functions_chunked"] == 0
+    assert data["chunks_created"] == 0
+
+
+def test_partial_failure_valid_function_still_chunked(tmp_path):
+    """When one function fails, other functions in different files are still chunked."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "good.py").write_text(_make_large_function("good_func", n_stmts=35), encoding="utf-8")
+    (repo / "bad.py").write_text(_make_large_function("bad_func", n_stmts=35), encoding="utf-8")
+    index_dir = str(tmp_path / "index")
+    index_repository(str(repo), index_dir=index_dir)
+
+    # Patch build_dependency_graph to fail only for bad_func
+    original_bdg = __import__(
+        "code_similarity_mcp.parser.python", fromlist=["build_dependency_graph"]
+    ).build_dependency_graph
+
+    def selective_fail(body_code: str):
+        if "bad_func" in body_code or body_code.count("x_") > 30:
+            # Fail for the first large function encountered by name heuristic;
+            # use a simpler discriminator: fail exactly once via a counter.
+            raise SyntaxError("malformed")
+        return original_bdg(body_code)
+
+    call_count = {"n": 0}
+
+    def fail_first_call(body_code: str):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise SyntaxError("simulated failure for first function")
+        return original_bdg(body_code)
+
+    with patch("code_similarity_mcp.mcp.server.build_dependency_graph", side_effect=fail_first_call):
+        data = json.loads(chunk_repository(str(repo), index_dir=index_dir))
+
+    # One function failed, one succeeded
+    assert data["functions_chunked"] == 1
+    assert data["chunks_created"] >= 1
+    assert len(data["skipped_files"]) == 1
+
+
+def test_skipped_files_deduplicated_per_file(tmp_path):
+    """If multiple functions in the same file fail, the file appears only once in skipped_files."""
+    content = (
+        _make_large_function("func_a", n_stmts=35)
+        + "\n\n"
+        + _make_large_function("func_b", n_stmts=35)
+    )
+    repo, index_dir = _setup_index(tmp_path, content)
+    with patch(
+        "code_similarity_mcp.mcp.server.build_dependency_graph",
+        side_effect=SyntaxError("fail all"),
+    ):
+        data = json.loads(chunk_repository(repo, index_dir=index_dir))
+    # Both functions are in the same file — skipped_files must have exactly one entry.
+    assert len(data["skipped_files"]) == 1
