@@ -75,8 +75,8 @@ def test_nonexistent_function_id_returns_error(tmp_path):
     assert "not found" in data["error"]
 
 
-def test_function_id_with_no_chunks_returns_empty_functions(tmp_path):
-    """A function that was indexed but never chunked should return empty."""
+def test_function_id_with_no_chunks_returns_metadata_and_hint(tmp_path):
+    """A function that was indexed but never chunked returns metadata + empty chunks + hint."""
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "mod.py").write_text(_make_small_function(), encoding="utf-8")
@@ -89,7 +89,13 @@ def test_function_id_with_no_chunks_returns_empty_functions(tmp_path):
     registry.close()
 
     data = json.loads(get_chunk_map(function_id=method["id"], index_dir=index_dir))
-    assert data == {"functions": []}
+    assert "error" not in data
+    assert "functions" in data
+    assert len(data["functions"]) == 1
+    fn = data["functions"][0]
+    assert fn["function_name"] == "small_func"
+    assert fn["chunks"] == []
+    assert fn["hint"] == "Run chunk_repository to generate chunks"
 
 
 def test_file_path_with_no_chunks_returns_empty_functions(tmp_path):
@@ -491,3 +497,61 @@ def test_exact_error_message_format(tmp_path):
     _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function())
     data = json.loads(get_chunk_map(function_id=99999, index_dir=index_dir))
     assert data["error"] == "Function 99999 not found in index"
+
+
+# ---------------------------------------------------------------------------
+# Feature #40: unprocessed large function returns empty chunks + hint
+# ---------------------------------------------------------------------------
+
+
+def test_unprocessed_large_function_returns_empty_chunks_and_hint(tmp_path):
+    """Index a repo WITHOUT chunking; get_chunk_map must return function metadata,
+    empty chunks list, and a hint — no error key."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "big.py").write_text(_make_large_function("unprocessed_func"), encoding="utf-8")
+    index_dir = str(tmp_path / "index")
+    index_repository(str(repo), index_dir=index_dir)
+    # Intentionally skip chunk_repository
+
+    registry = MethodRegistry(index_dir)
+    method = next(m for m in registry.get_all_methods() if m["name"] == "unprocessed_func")
+    func_id = method["id"]
+    registry.close()
+
+    data = json.loads(get_chunk_map(function_id=func_id, index_dir=index_dir))
+
+    # Must not contain an error key
+    assert "error" not in data
+
+    # Must contain exactly one function entry
+    assert "functions" in data
+    assert len(data["functions"]) == 1
+
+    fn = data["functions"][0]
+    assert fn["function_name"] == "unprocessed_func"
+    assert "file" in fn
+    assert fn["chunks"] == []
+    assert fn["hint"] == "Run chunk_repository to generate chunks"
+
+
+def test_unprocessed_function_distinct_from_unknown_function_id(tmp_path):
+    """Error path (unknown id) must have 'error' key; unprocessed path must not."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "big.py").write_text(_make_large_function("diff_func"), encoding="utf-8")
+    index_dir = str(tmp_path / "index")
+    index_repository(str(repo), index_dir=index_dir)
+
+    registry = MethodRegistry(index_dir)
+    method = next(m for m in registry.get_all_methods() if m["name"] == "diff_func")
+    func_id = method["id"]
+    registry.close()
+
+    # Valid id, no chunks → no error key
+    ok = json.loads(get_chunk_map(function_id=func_id, index_dir=index_dir))
+    assert "error" not in ok
+
+    # Unknown id → error key present
+    err = json.loads(get_chunk_map(function_id=func_id + 99999, index_dir=index_dir))
+    assert "error" in err

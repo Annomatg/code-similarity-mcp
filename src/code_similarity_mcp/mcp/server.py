@@ -772,7 +772,21 @@ def get_chunk_map(
         if not chunks:
             registry.close()
             log.info("get_chunk_map: no chunks for function_id=%d", function_id)
-            return json.dumps({"functions": []})
+            return json.dumps(
+                {
+                    "functions": [
+                        {
+                            "function_id": method["id"],
+                            "function_name": method["name"],
+                            "file": method["file_path"],
+                            "dag_valid": True,
+                            "chunks": [],
+                            "hint": "Run chunk_repository to generate chunks",
+                        }
+                    ]
+                },
+                indent=2,
+            )
 
         result = {"functions": [_build_function_map(method, chunks)]}
     else:
