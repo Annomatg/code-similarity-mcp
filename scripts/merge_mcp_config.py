@@ -34,6 +34,7 @@ def merge_mcp_entry(
         ValueError: If *config_path* exists but is not valid JSON.
     """
     entry: dict = {
+        "type": "stdio",
         "command": python_exe,
         "args": ["-m", "code_similarity_mcp"],
         "cwd": repo_root,

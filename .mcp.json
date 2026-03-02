@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "code-similarity": {
-      "command": "F:/Work/Godot/code-similarity-mcp/.venv/Scripts/python",
-      "args": ["-m", "code_similarity_mcp"]
-    }
-  }
-}
