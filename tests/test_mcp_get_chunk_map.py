@@ -67,11 +67,12 @@ def test_both_function_id_and_file_path_returns_error(tmp_path):
     assert "error" in data
 
 
-def test_nonexistent_function_id_returns_empty_functions(tmp_path):
+def test_nonexistent_function_id_returns_error(tmp_path):
     _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function())
     data = json.loads(get_chunk_map(function_id=999999, index_dir=index_dir))
-    # No chunks → empty functions list (function_id not found in chunks table)
-    assert data == {"functions": []}
+    assert "error" in data
+    assert "999999" in data["error"]
+    assert "not found" in data["error"]
 
 
 def test_function_id_with_no_chunks_returns_empty_functions(tmp_path):
@@ -431,3 +432,62 @@ def test_chunk_count_matches_registry(tmp_path):
 
     data = json.loads(get_chunk_map(function_id=method["id"], index_dir=index_dir))
     assert len(data["functions"][0]["chunks"]) == stored_count
+
+
+# ---------------------------------------------------------------------------
+# Tests: feature #39 — error for unknown function_id
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_function_id_error_has_error_key(tmp_path):
+    """get_chunk_map with a non-existent function_id must return an error key."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function())
+    data = json.loads(get_chunk_map(function_id=99999, index_dir=index_dir))
+    assert "error" in data
+
+
+def test_unknown_function_id_error_message_contains_id(tmp_path):
+    """The error message must include the unknown function_id."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function())
+    data = json.loads(get_chunk_map(function_id=99999, index_dir=index_dir))
+    assert "99999" in data["error"]
+
+
+def test_unknown_function_id_error_message_says_not_found(tmp_path):
+    """The error message must say the function was not found in index."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function())
+    data = json.loads(get_chunk_map(function_id=99999, index_dir=index_dir))
+    assert "not found" in data["error"].lower()
+
+
+def test_unknown_function_id_no_functions_key(tmp_path):
+    """Error response for unknown function_id must not have a 'functions' key."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function())
+    data = json.loads(get_chunk_map(function_id=99999, index_dir=index_dir))
+    assert "functions" not in data
+
+
+def test_unknown_function_id_error_and_valid_id_work_in_same_session(tmp_path):
+    """Unknown function_id returns error; valid function_id still works correctly."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function("session_func"))
+
+    # Unknown id should return error
+    error_data = json.loads(get_chunk_map(function_id=99999, index_dir=index_dir))
+    assert "error" in error_data
+
+    # Valid id should return correct data
+    registry = MethodRegistry(index_dir)
+    method = next(m for m in registry.get_all_methods() if m["name"] == "session_func")
+    registry.close()
+
+    ok_data = json.loads(get_chunk_map(function_id=method["id"], index_dir=index_dir))
+    assert "functions" in ok_data
+    assert len(ok_data["functions"]) == 1
+    assert ok_data["functions"][0]["function_name"] == "session_func"
+
+
+def test_exact_error_message_format(tmp_path):
+    """Error message must match 'Function {id} not found in index'."""
+    _, index_dir = _setup_index_and_chunks(tmp_path, _make_large_function())
+    data = json.loads(get_chunk_map(function_id=99999, index_dir=index_dir))
+    assert data["error"] == "Function 99999 not found in index"

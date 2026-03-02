@@ -763,16 +763,16 @@ def get_chunk_map(
     registry = _get_registry(index_dir)
 
     if function_id is not None:
+        method = registry._get_method_by_id(function_id)
+        if method is None:
+            registry.close()
+            return json.dumps({"error": f"Function {function_id} not found in index"})
+
         chunks = registry.get_chunks_by_function(function_id)
         if not chunks:
             registry.close()
             log.info("get_chunk_map: no chunks for function_id=%d", function_id)
             return json.dumps({"functions": []})
-
-        method = registry._get_method_by_id(function_id)
-        if method is None:
-            registry.close()
-            return json.dumps({"error": f"Function id {function_id} not found"})
 
         result = {"functions": [_build_function_map(method, chunks)]}
     else:
