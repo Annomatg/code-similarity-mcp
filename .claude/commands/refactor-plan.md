@@ -59,3 +59,31 @@ Refactoring hints: <refactoring_hints if present, otherwise "None">
 - Use file paths relative to the repository root in all names, descriptions, and steps.
 - Process pairs in score-descending order so the most critical duplicates appear first in the backlog.
 - Report a brief summary when finished: number of features created, score range covered.
+
+## Fallback: feature-mcp unavailable
+
+If `feature_create` is not available (tool call returns an error, the tool does not exist, or the feature MCP server is not configured), do **not** abort silently. Instead:
+
+1. Output the following note at the top of your response:
+
+   > **⚠ feature-mcp not found** — The `feature_create` tool is unavailable, so refactoring tasks could not be added to the backlog automatically.
+   > To enable automatic backlog creation, configure the feature MCP server globally:
+   > see [global MCP configuration instructions](https://github.com/anthropics/claude-code/blob/main/docs/mcp.md) and add `feature-mcp` to your `~/.claude/claude_desktop_config.json`.
+
+2. Then output the top 10 similar pairs (or all if fewer) as a formatted markdown table with these columns:
+
+   | # | Score | Exact | Method A | File A | Method B | File B | Suggested Action |
+   |---|-------|-------|----------|--------|----------|--------|-----------------|
+
+   - **#**: rank (1 = highest score)
+   - **Score**: similarity score rounded to 3 decimal places
+   - **Exact**: ✓ if `exact_match` is true, otherwise blank
+   - **Method A / Method B**: function name only
+   - **File A / File B**: relative file path (strip repo root prefix)
+   - **Suggested Action**: use `exact_match` and score to pick one of:
+     - `exact_match=true` → `"Consolidate immediately"`
+     - `score >= 0.95` → `"Extract shared function"`
+     - `score >= 0.85` → `"Review and extract if domain matches"`
+     - otherwise → `"Review manually"`
+
+3. After the table add a plain-text summary: total pairs found, score range, and a reminder that the analysis is complete but no backlog entries were created.
