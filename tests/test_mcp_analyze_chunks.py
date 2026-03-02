@@ -65,7 +65,7 @@ def test_nonexistent_chunk_id_returns_error(tmp_path):
     assert "error" in data
 
 
-def test_empty_chunk_index_returns_empty_results(tmp_path):
+def test_empty_chunk_index_returns_error(tmp_path):
     # Index a file but do NOT run chunk_repository → no chunks stored
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -74,7 +74,56 @@ def test_empty_chunk_index_returns_empty_results(tmp_path):
     index_repository(str(repo), index_dir=index_dir)
 
     data = json.loads(analyze_chunks(code_snippet="x = 1", index_dir=index_dir))
-    assert data == {"results": []}
+    assert "error" in data
+    assert "No chunks indexed" in data["error"]
+    assert "chunk_repository" in data["error"]
+
+
+def test_fresh_registry_returns_error_message(tmp_path):
+    """analyze_chunks on a completely empty registry returns a clear error."""
+    # No index_repository call at all — completely fresh registry
+    index_dir = str(tmp_path / "empty_index")
+    data = json.loads(analyze_chunks(code_snippet="x = 1", index_dir=index_dir))
+    assert "error" in data
+    assert "No chunks indexed" in data["error"]
+    assert "chunk_repository" in data["error"]
+
+
+def test_empty_chunk_index_no_exception_propagates(tmp_path):
+    """analyze_chunks must not raise even on an empty chunk index."""
+    index_dir = str(tmp_path / "empty_index")
+    # Should return a string without raising
+    result = analyze_chunks(code_snippet="x = 1", index_dir=index_dir)
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert "error" in data
+
+
+def test_empty_chunk_index_method_index_unaffected(tmp_path):
+    """Method (non-chunk) index is intact after analyze_chunks is called on empty chunks."""
+    from code_similarity_mcp.index.registry import MethodRegistry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "small.py").write_text("def f(a):\n    return a\n", encoding="utf-8")
+    index_dir = str(tmp_path / "index")
+    index_repository(str(repo), index_dir=index_dir)
+
+    # Verify method is indexed before calling analyze_chunks
+    registry = MethodRegistry(index_dir)
+    methods_before = registry.get_all_methods()
+    registry.close()
+    assert len(methods_before) > 0, "Expected at least one method indexed"
+
+    # Call analyze_chunks without chunking (empty chunk index)
+    data = json.loads(analyze_chunks(code_snippet="x = 1", index_dir=index_dir))
+    assert "error" in data
+
+    # Method index should be unchanged
+    registry = MethodRegistry(index_dir)
+    methods_after = registry.get_all_methods()
+    registry.close()
+    assert len(methods_after) == len(methods_before)
 
 
 # ---------------------------------------------------------------------------

@@ -575,8 +575,8 @@ def analyze_chunks(
 
     if registry.get_chunk_count() == 0:
         registry.close()
-        log.info("analyze_chunks: chunk index is empty")
-        return json.dumps({"results": []})
+        log.info("analyze_chunks: chunk index is empty — no chunks indexed")
+        return json.dumps({"error": "No chunks indexed. Run chunk_repository first."})
 
     exclude_id: int | None = None
 
