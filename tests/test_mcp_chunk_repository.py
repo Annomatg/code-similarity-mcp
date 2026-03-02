@@ -545,3 +545,91 @@ def test_only_new_function_chunked_when_stable_already_chunked(tmp_path):
     registry.close()
 
     assert stable_chunks_after == stable_chunks_before
+
+
+# ---------------------------------------------------------------------------
+# Tests: feature #35 — no large functions → empty result, no exception
+# ---------------------------------------------------------------------------
+
+
+def _make_at_threshold_function(name: str = "at_threshold") -> str:
+    """Generate a function with exactly 30 statements (not chunked, since threshold is >30).
+
+    count_statements includes the 'def' header, so:
+    1 (def) + 28 (assignments) + 1 (return) = 30 total.
+    """
+    lines = [f"def {name}():"]
+    for i in range(28):
+        lines.append(f"    x_{i} = {i}")
+    lines.append("    return x_0")
+    return "\n".join(lines) + "\n"
+
+
+def test_no_large_functions_returns_valid_summary(tmp_path):
+    """Step 1+2: all functions ≤30 stmts → valid summary with zero chunking counts."""
+    repo, index_dir = _setup_index(tmp_path, _make_small_function())
+    data = json.loads(chunk_repository(repo, index_dir=index_dir))
+    assert data == {"files_scanned": 1, "functions_chunked": 0, "chunks_created": 0}
+
+
+def test_no_large_functions_no_exception_raised(tmp_path):
+    """Step 3: chunk_repository must not raise when no functions exceed the threshold."""
+    repo, index_dir = _setup_index(tmp_path, _make_small_function())
+    # If an exception were raised, pytest would fail here automatically.
+    result = chunk_repository(repo, index_dir=index_dir)
+    assert isinstance(result, str)
+
+
+def test_no_large_functions_no_chunk_entries_written(tmp_path):
+    """Step 4: chunk table must remain empty when no functions exceed the threshold."""
+    repo, index_dir = _setup_index(tmp_path, _make_small_function())
+    chunk_repository(repo, index_dir=index_dir)
+    registry = MethodRegistry(index_dir)
+    assert registry.get_chunk_count() == 0
+    registry.close()
+
+
+def test_at_threshold_functions_not_chunked(tmp_path):
+    """Functions with exactly 30 statements (= threshold) must not be chunked."""
+    repo, index_dir = _setup_index(tmp_path, _make_at_threshold_function())
+    data = json.loads(chunk_repository(repo, index_dir=index_dir))
+    assert data["functions_chunked"] == 0
+    assert data["chunks_created"] == 0
+    registry = MethodRegistry(index_dir)
+    assert registry.get_chunk_count() == 0
+    registry.close()
+
+
+def test_multiple_small_functions_all_skipped(tmp_path):
+    """Multiple small functions across multiple files → files_scanned=N, zeros for chunking."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text(_make_small_function("f1"), encoding="utf-8")
+    (repo / "b.py").write_text(_make_small_function("f2"), encoding="utf-8")
+    (repo / "c.py").write_text(_make_small_function("f3"), encoding="utf-8")
+    index_dir = str(tmp_path / "index")
+    index_repository(str(repo), index_dir=index_dir)
+
+    data = json.loads(chunk_repository(str(repo), index_dir=index_dir))
+    assert data["files_scanned"] == 3
+    assert data["functions_chunked"] == 0
+    assert data["chunks_created"] == 0
+
+
+def test_empty_index_returns_zero_summary(tmp_path):
+    """chunk_repository on a valid dir with no indexed methods returns all zeros."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    index_dir = str(tmp_path / "index")
+    # Do NOT call index_repository — the index is empty.
+    data = json.loads(chunk_repository(str(repo), index_dir=index_dir))
+    assert data == {"files_scanned": 0, "functions_chunked": 0, "chunks_created": 0}
+
+
+def test_empty_index_no_exception(tmp_path):
+    """chunk_repository on an empty index must not raise."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    index_dir = str(tmp_path / "index")
+    result = chunk_repository(str(repo), index_dir=index_dir)
+    assert "error" not in json.loads(result)
